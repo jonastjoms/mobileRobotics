@@ -59,6 +59,7 @@ def adjust_pose(node, final_position, occupancy_grid):
       angle_step = - angle_step
   # Use the parametric equation between these two angles
   angles = np.arange(angle_node2, angle_node1, angle_step)
+
   is_valid = True
   for angle in angles:
       x = center[X] + radius*np.cos(angle)
@@ -175,7 +176,6 @@ class Node(object):
   def cost(self, c):
     self._cost = c
 
-
 def rrt(start_pose, goal_position, occupancy_grid):
   # RRT builds a graph one node at a time.
   graph = []
@@ -196,18 +196,33 @@ def rrt(start_pose, goal_position, occupancy_grid):
     # Pick a node at least some distance away but not too far.
     # We also verify that the angles are aligned (within pi / 4).
     u = None
+    i = 0
+    min_cost = np.inf
     for n, d in potential_parent:
       if d > .2 and d < 1.5 and n.direction.dot(position - n.position) / d > 0.70710678118:
-        u = n
-        break
-    else:
+        if (n.cost + d) < min_cost:
+            min_cost = n.cost + d
+            u = n
+    if u == None:
       continue
     v = adjust_pose(u, position, occupancy_grid)
     if v is None:
       continue
     u.add_neighbor(v)
     v.parent = u
+    v.cost = u.cost + d
     graph.append(v)
+    # Rewrite graph:
+    neighbors = sorted(((n, np.linalg.norm(position - n.position)) for n in graph), key=lambda x: x[1])
+    close_neighbors = []
+    for n, d in neighbors:
+        if d > .2 and d < 1.5:
+            close_neighbors.append((n,d))
+    for n, d in close_neighbors:
+        if (v.cost + d) < n.cost:
+            n.cost = v.cost + d
+            n.parent = v
+
     if np.linalg.norm(v.position - goal_position) < .2:
       final_node = v
       break

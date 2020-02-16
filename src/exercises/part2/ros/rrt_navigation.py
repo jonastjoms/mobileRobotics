@@ -48,8 +48,11 @@ def feedback_linearized(pose, velocity, epsilon):
   return u, w
 
 def get_velocity(position, path_points):
-  v = np.zeros_like(position)
+  v = np.zeros_like(position
   if len(path_points) == 0:
+    return v
+  # Stop moving if the goal is reached.
+  if np.linalg.norm(position - path_points[-1]) < .2:
     return v
   # Create an array where every element is the euclidean distance from the current position to points on the path
   distances = []
@@ -64,9 +67,6 @@ def get_velocity(position, path_points):
       v = path_points[closest_point] - position
   # Scale v
   v = 5*v
-  # Stop moving if the goal is reached.
-  if np.linalg.norm(position - path_points[-1]) < .2:
-    return v
   return v
 
 
