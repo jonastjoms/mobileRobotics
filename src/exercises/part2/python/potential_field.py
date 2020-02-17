@@ -11,6 +11,7 @@ WALL_OFFSET = 2.
 VIRTUAL_POSITION = np.array([-.5, 1], dtype=np.float32)
 VIRTUAL_RADIUS = .1
 CYLINDER_POSITION = np.array([.5, .0], dtype=np.float32)
+CYLINDER_POSITION = np.array([.3, .2], dtype=np.float32)
 CYLINDER_POSITION2 = np.array([.0, .5], dtype=np.float32)
 CYLINDER_RADIUS = .3
 GOAL_POSITION = np.array([1.5, 1.5], dtype=np.float32)
@@ -38,7 +39,7 @@ def get_velocity_to_reach_goal(position, goal_position):
 
 def get_velocity_to_avoid_obstacles(position, obstacle_positions, obstacle_radii):
   # Damping variable:
-  zeta = 0.3
+  zeta = 0.5
   # Threshold
   b = 0.5
   # Euclidean distance to center:
@@ -90,14 +91,14 @@ def get_velocity(position, mode='all'):
       position,
       [CYLINDER_POSITION],
       [CYLINDER_RADIUS])
-    v_avoid += get_velocity_to_avoid_obstacles(
-      position,
-      [CYLINDER_POSITION2],
-      [CYLINDER_RADIUS])
+    #v_avoid += get_velocity_to_avoid_obstacles(
+      #position,
+      #[CYLINDER_POSITION2],
+      #[CYLINDER_RADIUS])
     v_virtual = get_velocity_to_virtual_fields(position, VIRTUAL_POSITION)
   else:
     v_avoid = np.zeros(2, dtype=np.float32)
-  v = v_goal + v_avoid + v_virtual
+  v = v_goal + v_avoid #+ v_virtual
   return cap(v, max_speed=MAX_SPEED)
 
 
@@ -120,10 +121,10 @@ if __name__ == '__main__':
   plt.quiver(X, Y, U, V, units='width')
 
   # Plot environment.
-  if args.mode == 'all':
-      ax.add_artist(plt.Circle(VIRTUAL_POSITION, VIRTUAL_RADIUS, color='green'))
+  #if args.mode == 'all':
+      #ax.add_artist(plt.Circle(VIRTUAL_POSITION, VIRTUAL_RADIUS, color='green'))
   ax.add_artist(plt.Circle(CYLINDER_POSITION, CYLINDER_RADIUS, color='gray'))
-  ax.add_artist(plt.Circle(CYLINDER_POSITION2, CYLINDER_RADIUS, color='gray'))
+  #ax.add_artist(plt.Circle(CYLINDER_POSITION2, CYLINDER_RADIUS, color='gray'))
   plt.plot([-WALL_OFFSET, WALL_OFFSET], [-WALL_OFFSET, -WALL_OFFSET], 'k')
   plt.plot([-WALL_OFFSET, WALL_OFFSET], [WALL_OFFSET, WALL_OFFSET], 'k')
   plt.plot([-WALL_OFFSET, -WALL_OFFSET], [-WALL_OFFSET, WALL_OFFSET], 'k')

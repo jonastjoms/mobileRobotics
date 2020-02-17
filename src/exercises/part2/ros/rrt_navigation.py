@@ -43,12 +43,19 @@ YAW = 2
 
 
 def feedback_linearized(pose, velocity, epsilon):
-  u = velocity[X]*np.cos(pose[YAW]) + velocity[Y]*np.sin(pose[YAW])  # [m/s]
-  w = (1/epsilon)*(-velocity[X]*np.sin(pose[YAW])+ velocity[Y]*np.cos(pose[YAW]))  # [rad/s] going counter-clockwise.
+  # Get theta_dot
+  theta_dot = np.arctan2(velocity[Y], velocity[X])-pose[YAW]
+  # Arctan2 gives angles from -pi to pi, must handle
+  theta_dot = np.mod(theta_dot + np.pi, 2*np.pi)-np.pi
+  # Feedback linearization:
+  x_p_dot = velocity[X] + epsilon*(-theta_dot*np.sin(pose[YAW]))
+  y_p_dot = velocity[Y] + epsilon*(theta_dot*np.cos(pose[YAW]))
+  u = x_p_dot*np.cos(pose[YAW]) + y_p_dot*np.sin(pose[YAW])  # [m/s]
+  w = (1/epsilon)*(-x_p_dot*np.sin(pose[YAW])+ y_p_dot*np.cos(pose[YAW]))  # [rad/s] going counter-clockwise.
   return u, w
 
 def get_velocity(position, path_points):
-  v = np.zeros_like(position
+  v = np.zeros_like(position)
   if len(path_points) == 0:
     return v
   # Stop moving if the goal is reached.
