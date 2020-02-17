@@ -55,8 +55,11 @@ def adjust_pose(node, final_position, occupancy_grid):
   angle_node1 = np.arctan2(v_center_node1[Y], v_center_node1[X])
   angle_node2 = np.arctan2(v_center_node2[Y], v_center_node2[X])
   angle_step = 0.005
+  angle_between = angle_node1 - angle_node2
   if angle_node1 < angle_node2:
       angle_step = - angle_step
+      angle_between = -angle_between
+  print(angle_between)
   # Use the parametric equation between these two angles
   angles = np.arange(angle_node2, angle_node1, angle_step)
 
@@ -212,17 +215,6 @@ def rrt(start_pose, goal_position, occupancy_grid):
     v.parent = u
     v.cost = u.cost + d
     graph.append(v)
-    # Rewrite graph:
-    neighbors = sorted(((n, np.linalg.norm(position - n.position)) for n in graph), key=lambda x: x[1])
-    close_neighbors = []
-    for n, d in neighbors:
-        if d > .2 and d < 1.5:
-            close_neighbors.append((n,d))
-    for n, d in close_neighbors:
-        if (v.cost + d) < n.cost:
-            n.cost = v.cost + d
-            n.parent = v
-
     if np.linalg.norm(v.position - goal_position) < .2:
       final_node = v
       break

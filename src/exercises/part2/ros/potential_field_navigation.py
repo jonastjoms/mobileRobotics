@@ -41,8 +41,8 @@ YAW = 2
 
 
 def feedback_linearized(pose, velocity, epsilon):
-  u = velocity[X]*np.cos(pose[YAW]) + velocity[Y]*np.sin(pose[YAW])  # [m/s]
-  w = (1/epsilon)*(-velocity[X]*np.sin(pose[YAW])+ velocity[Y]*np.cos(pose[YAW]))  # [rad/s] going counter-clockwise.
+  #u = velocity[X]*np.cos(pose[YAW]) + velocity[Y]*np.sin(pose[YAW])  # [m/s]
+  #w = (1/epsilon)*(-velocity[X]*np.sin(pose[YAW])+ velocity[Y]*np.cos(pose[YAW]))  # [rad/s] going counter-clockwise.
   return u, w
 
 
@@ -127,7 +127,6 @@ def run(args):
 
     # Get velocity.
     v = get_velocity(point_position, goal_position, obstacle_position)
-    print("v",v)
     u, w = feedback_linearized(pose, v, epsilon=EPSILON)
     vel_msg = Twist()
     vel_msg.linear.x = u

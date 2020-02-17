@@ -55,10 +55,14 @@ def adjust_pose(node, final_position, occupancy_grid):
   angle_node1 = np.arctan2(v_center_node1[Y], v_center_node1[X])
   angle_node2 = np.arctan2(v_center_node2[Y], v_center_node2[X])
   angle_step = 0.005
+  angle_between = angle_node1 - angle_node2
   if angle_node1 < angle_node2:
       angle_step = - angle_step
+      angle_between = -angle_between
+  print(angle_between)
   # Use the parametric equation between these two angles
   angles = np.arange(angle_node2, angle_node1, angle_step)
+
   is_valid = True
   for angle in angles:
       x = center[X] + radius*np.cos(angle)

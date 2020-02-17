@@ -29,25 +29,32 @@ def get_velocity_to_reach_goal(position, goal_position):
   v = zeta*grad
   # Add stochasticity
   v = [np.random.normal(v[0], 0.1), np.random.normal(v[1], 0.1)]
+  if v[0] > 0.5:
+      v[0] = 0.5
+  if v[1] > 0.5:
+      v[1] = 0.5
   return v
 
 
 def get_velocity_to_avoid_obstacles(position, obstacle_positions, obstacle_radii):
   # Damping variable:
-  zeta = 0.5
+  zeta = 0.3
   # Threshold
   b = 0.5
   # Euclidean distance to center:
   dist = np.linalg.norm(obstacle_positions-position)
   # Determine gradient
   grad = -(obstacle_positions-position)/(np.max((dist - obstacle_radii, b)))**2
+  # If too far from obstacle set force to zero:
+  if dist > 1.5:
+      zeta = zeta*0
   # Multiply with damping variable
   v = zeta*grad[0]
   return v
 
 def get_velocity_to_virtual_fields(position, virtual_position):
   # Damping variable:
-  zeta = 1
+  zeta = 0.5
   # Euclidean distance:
   dist = np.linalg.norm(virtual_position-position)
   # Determine gradient
@@ -55,7 +62,6 @@ def get_velocity_to_virtual_fields(position, virtual_position):
   # Multiply with damping variable
   v = zeta*grad
   # Add stochasticity
-  print(v)
   v = [np.random.normal(v[0], 0.1), np.random.normal(v[1], 0.1)]
   return v
 
@@ -73,10 +79,10 @@ def cap(v, max_speed):
     return v / n * max_speed
   return v
 
-
 def get_velocity(position, mode='all'):
   if mode in ('goal', 'all'):
     v_goal = get_velocity_to_reach_goal(position, GOAL_POSITION)
+    v_virtual = get_velocity_to_virtual_fields(position, VIRTUAL_POSITION)
   else:
     v_goal = np.zeros(2, dtype=np.float32)
   if mode in ('obstacle', 'all'):
