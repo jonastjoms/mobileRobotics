@@ -134,7 +134,6 @@ def run(args):
 
     # Get velocity.
     v = get_velocity(point_position, goal_position, obstacle_position)
-    print("v",v)
     u, w = feedback_linearized(pose, v, epsilon=EPSILON)
     vel_msg = Twist()
     vel_msg.linear.x = u

@@ -41,16 +41,25 @@ def get_velocity_to_avoid_obstacles(position, obstacle_positions, obstacle_radii
   # Damping variable:
   zeta = 0.5
   # Threshold
-  b = 0.5
+  b = 0.8
   # Euclidean distance to center:
   dist = np.linalg.norm(obstacle_positions-position)
   # Determine gradient
   grad = -(obstacle_positions-position)/(np.max((dist - obstacle_radii, b)))**2
   # If too far from obstacle set force to zero:
-  if dist > 1.5:
+  if dist > 1:
       zeta = zeta*0
+  # Add some rotational force
+  grad = grad[0]
+  def perpendicular(v):
+    w = np.empty_like(v)
+    print(v[0])
+    w[0] = -v[1]
+    w[1] = v[0]
+    return w
+  perp = perpendicular(grad)
   # Multiply with damping variable
-  v = zeta*grad[0]
+  v = zeta*grad + 0.2*perp
   return v
 
 def get_velocity_to_virtual_fields(position, virtual_position):
