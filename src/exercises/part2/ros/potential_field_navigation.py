@@ -39,7 +39,6 @@ X = 0
 Y = 1
 YAW = 2
 
-
 def feedback_linearized(pose, velocity, epsilon):
   # Get theta_dot
   theta_dot = np.arctan2(velocity[Y], velocity[X])-pose[YAW]
@@ -51,7 +50,6 @@ def feedback_linearized(pose, velocity, epsilon):
   u = x_p_dot*np.cos(pose[YAW]) + y_p_dot*np.sin(pose[YAW])  # [m/s]
   w = (1/epsilon)*(-x_p_dot*np.sin(pose[YAW])+ y_p_dot*np.cos(pose[YAW]))  # [rad/s] going counter-clockwise.
   return u, w
-
 
 def get_relative_position(absolute_pose, absolute_position):
   # Relative position in world frame:

@@ -1,7 +1,7 @@
 <launch>
-  <!-- 
-       Default GUI to true for local Gazebo client. Allows override 
-       to set disable GUI for RoboMaker. See part0.launch. 
+  <!--
+       Default GUI to true for local Gazebo client. Allows override
+       to set disable GUI for RoboMaker. See part0.launch.
   -->
   <arg name="use_gui" default="true"/>
 
@@ -11,7 +11,7 @@
   <arg name="z_pos" default="0.0"/>
 
   <include file="$(find gazebo_ros)/launch/empty_world.launch">
-    <arg name="world_name" value="$(find exercises)/part1/ros/worlds/simple.world"/>
+    <arg name="world_name" value="$(find exercises)/part1/ros/worlds/empty.world"/>
     <arg name="paused" value="true"/>
     <arg name="use_sim_time" value="true"/>
     <arg name="gui" value="$(arg use_gui)"/>

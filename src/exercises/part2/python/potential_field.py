@@ -101,7 +101,6 @@ def get_velocity(position, mode='all'):
   v = v_goal + v_avoid #+ v_virtual
   return cap(v, max_speed=MAX_SPEED)
 
-
 if __name__ == '__main__':
   parser = argparse.ArgumentParser(description='Runs obstacle avoidance with a potential field')
   parser.add_argument('--mode', action='store', default='all', help='Which velocity field to plot.', choices=['obstacle', 'goal', 'all'])

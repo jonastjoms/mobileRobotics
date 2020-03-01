@@ -3,6 +3,7 @@
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
+from __future__ import with_statement
 
 import argparse
 import numpy as np
@@ -10,6 +11,18 @@ import os
 import rospy
 import sys
 import scipy
+import copy
+from math import pi, sqrt
+from collections import deque
+import random
+import torch
+import time
+import cPickle as pickle
+from torch import optim
+from tqdm import tqdm
+from hyperparams_ur10 import OFF_POLICY_BATCH_SIZE as BATCH_SIZE, DISCOUNT, ENTROPY_WEIGHT, HIDDEN_SIZE, LEARNING_RATE, MAX_STEPS, POLYAK_FACTOR, REPLAY_SIZE, UPDATE_INTERVAL, UPDATE_START, SAVE_INTERVAL
+from models_ur10_agent import Critic, SoftActor, create_target_network, update_target_network
+from decimal import Decimal
 
 # Robot motion commands:
 # http://docs.ros.org/api/geometry_msgs/html/msg/Twist.html
@@ -25,22 +38,39 @@ from nav_msgs.msg import Path
 # For pose information.
 from tf.transformations import euler_from_quaternion
 
-# Import the potential_field.py code rather than copy-pasting.
+
+# Import the rrt code rather than copy-pasting.
 directory = os.path.join(os.path.dirname(os.path.realpath(__file__)), '../python')
 sys.path.insert(0, directory)
 try:
-  import rrt
+  import rrt_improved
 except ImportError:
   raise ImportError('Unable to import potential_field.py. Make sure this file is in "{}"'.format(directory))
 
-
 SPEED = .2
 EPSILON = .1
-
 X = 0
 Y = 1
 YAW = 2
 
+class Observation:
+
+    def __init__(self):
+        self.robot_x = 0
+        self.robot_y = 0
+        self.path_points = 0
+        self.state = [self.robot_x, self.robot_y, self.path_points]
+
+# Method to get state from observations
+    def get_state(self, obs):
+        self.robot_x = obs.robot_x
+        self.robot_y = obs.robot_y
+        self.path_points = obs.path_points
+        self.state = [self.robot_x, self.robot_y, self.path_points]
+
+def reset(start_pos):
+    # Set robot position to start_pos
+    return True
 
 def feedback_linearized(pose, velocity, epsilon):
   # Get theta_dot
@@ -52,8 +82,10 @@ def feedback_linearized(pose, velocity, epsilon):
   y_p_dot = velocity[Y] + epsilon*(theta_dot*np.cos(pose[YAW]))
   u = x_p_dot*np.cos(pose[YAW]) + y_p_dot*np.sin(pose[YAW])  # [m/s]
   w = (1/epsilon)*(-x_p_dot*np.sin(pose[YAW])+ y_p_dot*np.cos(pose[YAW]))  # [rad/s] going counter-clockwise.
+
   return u, w
 
+# Do stuff here:
 def get_velocity(position, path_points):
   v = np.zeros_like(position)
   if len(path_points) == 0:
@@ -76,7 +108,7 @@ def get_velocity(position, path_points):
   v = 5*v
   return v
 
-
+# Leave as is
 class SLAM(object):
   def __init__(self):
     rospy.Subscriber('/map', OccupancyGrid, self.callback)
@@ -124,17 +156,17 @@ class SLAM(object):
   def occupancy_grid(self):
     return self._occupancy_grid
 
-
 class GoalPose(object):
   def __init__(self):
-    rospy.Subscriber('/move_base_simple/goal', PoseStamped, self.callback)
-    self._position = np.array([np.nan, np.nan], dtype=np.float32)
+    # We choose goal:
+    self.xpos = 1.5
+    self.ypos = 1.5
+    self._position = np.array([self.xpos, self.ypos], dtype=np.float32)
 
-  def callback(self, msg):
-    # The pose from RViz is with respect to the "map".
-    self._position[X] = msg.pose.position.x
-    self._position[Y] = msg.pose.position.y
-    print('Received new goal position:', self._position)
+  def set_goal_pos(self, goal_pos):
+      self.xpos = goal_pos[0]
+      self.ypos = goal_pos[1]
+      self._position = np.array([self.xpos, self.ypos], dtype=np.float32)
 
   @property
   def ready(self):
@@ -144,7 +176,7 @@ class GoalPose(object):
   def position(self):
     return self._position
 
-
+# Leave as is
 def get_path(final_node):
   # Construct path from RRT solution.
   if final_node is None:
@@ -184,9 +216,40 @@ def get_path(final_node):
     points_y.extend(center[Y] + np.sin(angles) * radius)
   return zip(points_x, points_y)
 
-
+# Here the fun part goes:
 def run(args):
   rospy.init_node('rrt_navigation')
+
+  # Define reset/initial pose:
+  start_pos = np.array(0, 0, 0)
+  reset(start_pos)
+
+  device = torch.device("cuda" if torch.cuda.is_available() else "cpu" )
+  state = torch.tensor(observation.state).to(device)
+  done = False
+  reward = 0
+
+  # SAC initialisations
+  action_space = 2
+  state_space = 3
+  actor = SoftActor(HIDDEN_SIZE).to(device)
+  critic_1 = Critic(HIDDEN_SIZE, state_action=True).to(device)
+  critic_2 = Critic(HIDDEN_SIZE, state_action=True).to(device)
+  value_critic = Critic(HIDDEN_SIZE).to(device)
+  target_value_critic = create_target_network(value_critic).to(device)
+  actor_optimiser = optim.Adam(actor.parameters(), lr=LEARNING_RATE)
+  critics_optimiser = optim.Adam(list(critic_1.parameters()) + list(critic_2.parameters()), lr=LEARNING_RATE)
+  value_critic_optimiser = optim.Adam(value_critic.parameters(), lr=LEARNING_RATE)
+  D = deque(maxlen=REPLAY_SIZE)
+  # Automatic entropy tuning init
+  target_entropy = -np.prod(action_space).item()
+  log_alpha = torch.zeros(1, requires_grad=True, device=device)
+  alpha_optimizer = optim.Adam([log_alpha], lr=LEARNING_RATE)
+
+  # Other variables
+  reward_sparse = False
+  reward_dense = True
+  pbar = tqdm(xrange(1, MAX_STEPS + 1), unit_scale=1, smoothing=0)
 
   # Update control every 100 ms.
   rate_limiter = rospy.Rate(100)
@@ -197,7 +260,6 @@ def run(args):
   frame_id = 0
   current_path = []
   previous_time = rospy.Time.now().to_sec()
-
   # Stop moving message.
   stop_msg = Twist()
   stop_msg.linear.x = 0.
@@ -209,7 +271,6 @@ def run(args):
     publisher.publish(stop_msg)
     rate_limiter.sleep()
     i += 1
-
   while not rospy.is_shutdown():
     slam.update()
     current_time = rospy.Time.now().to_sec()
@@ -220,24 +281,27 @@ def run(args):
     if not goal.ready or not slam.ready:
       rate_limiter.sleep()
       continue
-
     goal_reached = np.linalg.norm(slam.pose[:2] - goal.position) < .2
     if goal_reached:
       publisher.publish(stop_msg)
       rate_limiter.sleep()
       continue
 
-    # Follow path using feedback linearization.
+    # Follow path using RL agent:
+    # Get state:
     position = np.array([
         slam.pose[X] + EPSILON * np.cos(slam.pose[YAW]),
         slam.pose[Y] + EPSILON * np.sin(slam.pose[YAW])], dtype=np.float32)
+    # Get action:
     v = get_velocity(position, np.array(current_path, dtype=np.float32))
     u, w = feedback_linearized(slam.pose, v, epsilon=EPSILON)
+    # Execute action:
     vel_msg = Twist()
     vel_msg.linear.x = u
     vel_msg.angular.z = w
     publisher.publish(vel_msg)
 
+    # Should this still be here?
     # Update plan every 1s.
     time_since = current_time - previous_time
     if current_path and time_since < 2.:
@@ -245,7 +309,7 @@ def run(args):
       continue
     previous_time = current_time
 
-    # Run RRT.
+    # Run RRT too find path:
     start_node, final_node = rrt.rrt(slam.pose, goal.position, slam.occupancy_grid)
     current_path = get_path(final_node)
     if not current_path:
@@ -271,7 +335,7 @@ def run(args):
 
 
 if __name__ == '__main__':
-  parser = argparse.ArgumentParser(description='Runs RRT navigation')
+  parser = argparse.ArgumentParser(description='Runs RL RRT navigation')
   args, unknown = parser.parse_known_args()
   try:
     run(args)
