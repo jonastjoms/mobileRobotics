@@ -20,8 +20,8 @@ import time
 import cPickle as pickle
 from torch import optim
 from tqdm import tqdm
-from hyperparams_ur10 import OFF_POLICY_BATCH_SIZE as BATCH_SIZE, DISCOUNT, ENTROPY_WEIGHT, HIDDEN_SIZE, LEARNING_RATE, MAX_STEPS, POLYAK_FACTOR, REPLAY_SIZE, UPDATE_INTERVAL, UPDATE_START, SAVE_INTERVAL
-from models_ur10_agent import Critic, SoftActor, create_target_network, update_target_network
+from hyperparams import OFF_POLICY_BATCH_SIZE as BATCH_SIZE, DISCOUNT, ENTROPY_WEIGHT, HIDDEN_SIZE, LEARNING_RATE, MAX_STEPS, POLYAK_FACTOR, REPLAY_SIZE, UPDATE_INTERVAL, UPDATE_START, SAVE_INTERVAL
+from models import Critic, SoftActor, create_target_network, update_target_network
 from decimal import Decimal
 
 # Robot motion commands:
@@ -52,25 +52,53 @@ EPSILON = .1
 X = 0
 Y = 1
 YAW = 2
+# Reset simulation service:
+Service = rospy.ServiceProxy('/gazebo/reset_simulation', Empty)
 
 class Observation:
 
     def __init__(self):
-        self.robot_x = 0
-        self.robot_y = 0
+        self.X = 0
+        self.Y = 0
         self.path_points = 0
-        self.state = [self.robot_x, self.robot_y, self.path_points]
+        self.state = [self.X, self.Y, self.path_points]
 
 # Method to get state from observations
-    def get_state(self, obs):
-        self.robot_x = obs.robot_x
-        self.robot_y = obs.robot_y
-        self.path_points = obs.path_points
-        self.state = [self.robot_x, self.robot_y, self.path_points]
+    def get_state(self, position, path_points):
+        self.X = position[X]
+        self.Y = position[Y]
+        self.path_points = path_points
+        self.state = [self.X, self.Y, self.path_points]
 
-def reset(start_pos):
-    # Set robot position to start_pos
-    return True
+def reset(slam):
+    response = service()
+    # Get position of robot and path points here:
+    position = np.array([
+        slam.pose[X] + EPSILON * np.cos(slam.pose[YAW]),
+        slam.pose[Y] + EPSILON * np.sin(slam.pose[YAW])], dtype=np.float32)
+    return position
+
+def new_path(slam, goal):
+    # Run RRT too find path:
+    start_node, final_node = rrt.rrt(slam.pose, goal.position, slam.occupancy_grid)
+    current_path = get_path(final_node)
+    if not current_path:
+      print('Unable to reach goal position:', goal.position)
+    # Publish path
+    path_msg = Path()
+    path_msg.header.seq = frame_id
+    path_msg.header.stamp = rospy.Time.now()
+    path_msg.header.frame_id = 'map'
+    for u in current_path:
+      pose_msg = PoseStamped()
+      pose_msg.header.seq = frame_id
+      pose_msg.header.stamp = path_msg.header.stamp
+      pose_msg.header.frame_id = 'map'
+      pose_msg.pose.position.x = u[X]
+      pose_msg.pose.position.y = u[Y]
+      path_msg.poses.append(pose_msg)
+    path_publisher.publish(path_msg)
+    return current_path
 
 def feedback_linearized(pose, velocity, epsilon):
   # Get theta_dot
@@ -84,29 +112,6 @@ def feedback_linearized(pose, velocity, epsilon):
   w = (1/epsilon)*(-x_p_dot*np.sin(pose[YAW])+ y_p_dot*np.cos(pose[YAW]))  # [rad/s] going counter-clockwise.
 
   return u, w
-
-# Do stuff here:
-def get_velocity(position, path_points):
-  v = np.zeros_like(position)
-  if len(path_points) == 0:
-    return v
-  # Stop moving if the goal is reached.
-  if np.linalg.norm(position - path_points[-1]) < .2:
-    return v
-  # Create an array where every element is the euclidean distance from the current position to points on the path
-  distances = []
-  for i, element in enumerate(path_points):
-      distances.append(np.linalg.norm(element-position))
-  # Shortest distance
-  closest_point = np.argmin(distances)
-  # Set veloccity towards next point in path_points
-  if len(path_points) > closest_point+1:
-      v = path_points[closest_point+1] - position
-  else:
-      v = path_points[closest_point] - position
-  # Scale v
-  v = 5*v
-  return v
 
 # Leave as is
 class SLAM(object):
@@ -158,15 +163,14 @@ class SLAM(object):
 
 class GoalPose(object):
   def __init__(self):
-    # We choose goal:
-    self.xpos = 1.5
-    self.ypos = 1.5
-    self._position = np.array([self.xpos, self.ypos], dtype=np.float32)
+    rospy.Subscriber('/move_base_simple/goal', PoseStamped, self.callback)
+    self._position = np.array([np.nan, np.nan], dtype=np.float32)
 
-  def set_goal_pos(self, goal_pos):
-      self.xpos = goal_pos[0]
-      self.ypos = goal_pos[1]
-      self._position = np.array([self.xpos, self.ypos], dtype=np.float32)
+  def callback(self, msg):
+    # The pose from RViz is with respect to the "map".
+    self._position[X] = msg.pose.position.x
+    self._position[Y] = msg.pose.position.y
+    print('Received new goal position:', self._position)
 
   @property
   def ready(self):
@@ -218,41 +222,29 @@ def get_path(final_node):
 
 # Here the fun part goes:
 def run(args):
-  rospy.init_node('rrt_navigation')
+  rospy.init_node('RL_rrt_test')
 
-  # Define reset/initial pose:
-  start_pos = np.array(0, 0, 0)
-  reset(start_pos)
-
+  # Torch initialisations
   device = torch.device("cuda" if torch.cuda.is_available() else "cpu" )
   state = torch.tensor(observation.state).to(device)
   done = False
   reward = 0
 
   # SAC initialisations
+  rewards = []
   action_space = 2
   state_space = 3
   actor = SoftActor(HIDDEN_SIZE).to(device)
-  critic_1 = Critic(HIDDEN_SIZE, state_action=True).to(device)
-  critic_2 = Critic(HIDDEN_SIZE, state_action=True).to(device)
-  value_critic = Critic(HIDDEN_SIZE).to(device)
-  target_value_critic = create_target_network(value_critic).to(device)
-  actor_optimiser = optim.Adam(actor.parameters(), lr=LEARNING_RATE)
-  critics_optimiser = optim.Adam(list(critic_1.parameters()) + list(critic_2.parameters()), lr=LEARNING_RATE)
-  value_critic_optimiser = optim.Adam(value_critic.parameters(), lr=LEARNING_RATE)
-  D = deque(maxlen=REPLAY_SIZE)
-  # Automatic entropy tuning init
-  target_entropy = -np.prod(action_space).item()
-  log_alpha = torch.zeros(1, requires_grad=True, device=device)
-  alpha_optimizer = optim.Adam([log_alpha], lr=LEARNING_RATE)
+  # Load models
+  if os.path.isfile("checkpoints/agent.pth"):
+      print("Loading models")
+      checkpoint = torch.load("checkpoints"/agent.pth")
+      actor.load_state_dict(checkpoint['actor_state_dict'])
+  else:
+      print("No checkpoint found")
 
-  # Other variables
-  reward_sparse = False
-  reward_dense = True
-  pbar = tqdm(xrange(1, MAX_STEPS + 1), unit_scale=1, smoothing=0)
-
-  # Update control every 100 ms.
-  rate_limiter = rospy.Rate(100)
+  # Update control every 200 ms.
+  rate_limiter = rospy.Rate(200)
   publisher = rospy.Publisher('/cmd_vel', Twist, queue_size=5)
   path_publisher = rospy.Publisher('/path', Path, queue_size=1)
   slam = SLAM()
@@ -276,7 +268,7 @@ def run(args):
     current_time = rospy.Time.now().to_sec()
 
     # Make sure all measurements are ready.
-     # Get map and current position through SLAM:
+    # Get map and current position through SLAM:
     # > roslaunch exercises slam.launch
     if not goal.ready or not slam.ready:
       rate_limiter.sleep()
@@ -287,51 +279,85 @@ def run(args):
       rate_limiter.sleep()
       continue
 
-    # Follow path using RL agent:
-    # Get state:
-    position = np.array([
-        slam.pose[X] + EPSILON * np.cos(slam.pose[YAW]),
-        slam.pose[Y] + EPSILON * np.sin(slam.pose[YAW])], dtype=np.float32)
-    # Get action:
-    v = get_velocity(position, np.array(current_path, dtype=np.float32))
-    u, w = feedback_linearized(slam.pose, v, epsilon=EPSILON)
-    # Execute action:
-    vel_msg = Twist()
-    vel_msg.linear.x = u
-    vel_msg.angular.z = w
-    publisher.publish(vel_msg)
+    # Reset and get observation:
+    position = reset(slam)
+    current_path = new_path(slam, goal)
+    obs.get_state(position, current_path)
+    state = torch.tensor(obs.state).to(device)
+    with torch.no_grad():
+        slam.update()
+        current_time = rospy.Time.now().to_sec()
+        action = actor(state.unsqueeze(0)).mean  # Use purely exploitative policy at test time
+        action = action/2
+        # Get forward and rotational velocity:
+        u, w = feedback_linearized(slam.pose, action, epsilon=EPSILON)
+        # Execute action:
+        vel_msg = Twist()
+        vel_msg.linear.x = u
+        vel_msg.angular.z = w
+        publisher.publish(vel_msg)
 
-    # Should this still be here?
-    # Update plan every 1s.
-    time_since = current_time - previous_time
-    if current_path and time_since < 2.:
-      rate_limiter.sleep()
-      continue
-    previous_time = current_time
+        # Execute action for 200ms
+        rate_limiter.sleep()
 
-    # Run RRT too find path:
-    start_node, final_node = rrt.rrt(slam.pose, goal.position, slam.occupancy_grid)
-    current_path = get_path(final_node)
-    if not current_path:
-      print('Unable to reach goal position:', goal.position)
+        # Action executed now calculate reward
+        position = np.array([
+            slam.pose[X] + EPSILON * np.cos(slam.pose[YAW]),
+            slam.pose[Y] + EPSILON * np.sin(slam.pose[YAW])], dtype=np.float32)
+        obs.get_state(position, current_path)
+        next_state = torch.tensor(obs.state).to(device)
+        # Reward: (Distance to next point on path)
+        # Create an array where every element is the euclidean distance from the current position to points on the path
+        distances = []
+        for i, element in enumerate(obs.path_points):
+            distances.append(np.linalg.norm(element-obs.position))
+        # Shortest distance to that point
+        closest_point = np.argmin(distances)
+        reward = distances[closest_point]
+        reward_sum += reward
 
-    # Publish path to RViz.
-    path_msg = Path()
-    path_msg.header.seq = frame_id
-    path_msg.header.stamp = rospy.Time.now()
-    path_msg.header.frame_id = 'map'
-    for u in current_path:
-      pose_msg = PoseStamped()
-      pose_msg.header.seq = frame_id
-      pose_msg.header.stamp = path_msg.header.stamp
-      pose_msg.header.frame_id = 'map'
-      pose_msg.pose.position.x = u[X]
-      pose_msg.pose.position.y = u[Y]
-      path_msg.poses.append(pose_msg)
-    path_publisher.publish(path_msg)
+        # Distance to goal:
+        goal_reached = np.linalg.norm(slam.pose[:2] - goal.position) < .3
+        # Check if Done
+        if (goal_reached):
+            publisher.publish(stop_msg)
+            print("Goal reached")
+            rate_limiter.sleep()
 
-    rate_limiter.sleep()
-    frame_id += 1
+        state = next_state
+
+        # Update plan every 3s.
+        time_since = current_time - previous_time
+        if current_path and time_since < 2.:
+          rate_limiter.sleep()
+          continue
+        previous_time = current_time
+
+        # Run RRT.
+        start_node, final_node = rrt.rrt(slam.pose, goal.position, slam.occupancy_grid)
+        current_path = get_path(final_node)
+        if not current_path:
+          print('Unable to reach goal position:', goal.position)
+
+        # Publish path to RViz.
+        path_msg = Path()
+        path_msg.header.seq = frame_id
+        path_msg.header.stamp = rospy.Time.now()
+        path_msg.header.frame_id = 'map'
+        for u in current_path:
+          pose_msg = PoseStamped()
+          pose_msg.header.seq = frame_id
+          pose_msg.header.stamp = path_msg.header.stamp
+          pose_msg.header.frame_id = 'map'
+          pose_msg.pose.position.x = u[X]
+          pose_msg.pose.position.y = u[Y]
+          path_msg.poses.append(pose_msg)
+        path_publisher.publish(path_msg)
+
+        torch.cuda.empty_cache()
+
+        frame_id += 1
+
 
 
 if __name__ == '__main__':
