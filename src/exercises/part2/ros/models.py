@@ -69,7 +69,7 @@ class Critic(nn.Module):
   def __init__(self, hidden_size, state_action=False, layer_norm=False):
     super(Critic, self).__init__()
     self.state_action = state_action
-    layers = [nn.Linear(8 + (2 if state_action else 0), hidden_size), nn.Tanh(), nn.Linear(hidden_size, hidden_size), nn.Tanh(), nn.Linear(hidden_size, 1)]
+    layers = [nn.Linear(3 + (2 if state_action else 0), hidden_size), nn.Tanh(), nn.Linear(hidden_size, hidden_size), nn.Tanh(), nn.Linear(hidden_size, 1)]
     if layer_norm:
       layers = layers[:1] + [nn.LayerNorm(hidden_size)] + layers[1:3] + [nn.LayerNorm(hidden_size)] + layers[3:]  # Insert layer normalisation between fully-connected layers and nonlinearities
     self.value = nn.Sequential(*layers)
