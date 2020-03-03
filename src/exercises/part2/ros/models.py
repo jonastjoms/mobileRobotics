@@ -11,7 +11,7 @@ from itertools import izip
 class Actor(nn.Module):
   def __init__(self, hidden_size, stochastic=True, layer_norm=False):
     super(Actor, self).__init__()
-    layers = [nn.Linear(3, hidden_size), nn.Tanh(), nn.Linear(hidden_size, hidden_size), nn.Tanh(), nn.Linear(hidden_size, 1)]
+    layers = [nn.Linear(6, hidden_size), nn.Tanh(), nn.Linear(hidden_size, hidden_size), nn.Tanh(), nn.Linear(hidden_size, 1)]
     if layer_norm:
       layers = layers[:1] + [nn.LayerNorm(hidden_size)] + layers[1:3] + [nn.LayerNorm(hidden_size)] + layers[3:]  # Insert layer normalisation between fully-connected layers and nonlinearities
     self.policy = nn.Sequential(*layers)
@@ -55,7 +55,7 @@ class SoftActor(nn.Module):
   def __init__(self, hidden_size):
     super(SoftActor, self).__init__()
     self.log_std_min, self.log_std_max = -20, 2  # Constrain range of standard deviations to prevent very deterministic/stochastic policies
-    layers = [nn.Linear(3, hidden_size), nn.Tanh(), nn.Linear(hidden_size, hidden_size), nn.Tanh(), nn.Linear(hidden_size, 3)]
+    layers = [nn.Linear(6, hidden_size), nn.Tanh(), nn.Linear(hidden_size, hidden_size), nn.Tanh(), nn.Linear(hidden_size, 3)]
     self.policy = nn.Sequential(*layers)
 
   def forward(self, state):
@@ -69,7 +69,7 @@ class Critic(nn.Module):
   def __init__(self, hidden_size, state_action=False, layer_norm=False):
     super(Critic, self).__init__()
     self.state_action = state_action
-    layers = [nn.Linear(3 + (2 if state_action else 0), hidden_size), nn.Tanh(), nn.Linear(hidden_size, hidden_size), nn.Tanh(), nn.Linear(hidden_size, 1)]
+    layers = [nn.Linear(6 + (2 if state_action else 0), hidden_size), nn.Tanh(), nn.Linear(hidden_size, hidden_size), nn.Tanh(), nn.Linear(hidden_size, 1)]
     if layer_norm:
       layers = layers[:1] + [nn.LayerNorm(hidden_size)] + layers[1:3] + [nn.LayerNorm(hidden_size)] + layers[3:]  # Insert layer normalisation between fully-connected layers and nonlinearities
     self.value = nn.Sequential(*layers)

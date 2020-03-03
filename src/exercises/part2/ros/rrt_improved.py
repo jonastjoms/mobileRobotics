@@ -59,7 +59,6 @@ def adjust_pose(node, final_position, occupancy_grid):
   if angle_node1 < angle_node2:
       angle_step = - angle_step
       angle_between = -angle_between
-  print(angle_between)
   # Use the parametric equation between these two angles
   angles = np.arange(angle_node2, angle_node1, angle_step)
 
