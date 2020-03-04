@@ -30,16 +30,15 @@ actor = SoftActor(HIDDEN_SIZE).to(device)
 critic_1 = Critic(HIDDEN_SIZE, state_action=True).to(device)
 critic_2 = Critic(HIDDEN_SIZE, state_action=True).to(device)
 value_critic = Critic(HIDDEN_SIZE).to(device)
-if os.path.isfile("checkpoints/agent.pth"):
+if os.path.isfile("/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/agent.pth"):
     print("Loading models")
-    checkpoint = torch.load(package_path+"/scripts/checkpoints_human/agent.pth")
+    checkpoint = torch.load("/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/agent.pth")
     actor.load_state_dict(checkpoint['actor_state_dict'])
     critic_1.load_state_dict(checkpoint['critic_1_state_dict'])
     critic_2.load_state_dict(checkpoint['critic_2_state_dict'])
     value_critic.load_state_dict(checkpoint['value_critic_state_dict'])
     UPDATE_START = 1
-else:
-    print("No checkpoint found at '{}'".format(package_path+"/scripts/checkpoints_human/agent.pth"))
+
 
 target_value_critic = create_target_network(value_critic).to(device)
 actor_optimiser = optim.Adam(actor.parameters(), lr=LEARNING_RATE)
@@ -52,15 +51,15 @@ log_alpha = torch.zeros(1, requires_grad=True, device=device)
 alpha_optimizer = optim.Adam([log_alpha], lr=LEARNING_RATE)
 
 # Load models
-if os.path.isfile("checkpoints/agent.pth"):
+if os.path.isfile("/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/agent.pth"):
     target_value_critic.load_state_dict(checkpoint['target_value_critic_state_dict'])
     actor_optimiser.load_state_dict(checkpoint['actor_optimiser_state_dict'])
     critics_optimiser.load_state_dict(checkpoint['critics_optimiser_state_dict'])
     value_critic_optimiser.load_state_dict(checkpoint['value_critic_optimiser_state_dict'])
     alpha_optimizer.load_state_dict(checkpoint['alpha_optimizer_state_dict'])
-    D = pickle.load( open( package_path+"/scripts/checkpoints_human/agent.p", "rb" ) )
+    D = pickle.load( open("/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/deque.p", "rb" ) )
 
-pbar = tqdm(xrange(1, 10000 + 1), unit_scale=1, smoothing=0)
+pbar = tqdm(xrange(1, 50000 + 1), unit_scale=1, smoothing=0)
 
 # Training loop
 for steps in pbar:
@@ -119,6 +118,6 @@ torch.save({
 'actor_optimiser_state_dict': actor_optimiser.state_dict(),
 'critics_optimiser_state_dict': critics_optimiser.state_dict(),
 'alpha_optimizer_state_dict': alpha_optimizer.state_dict(),
-},package_path+"/scripts/checkpoints_human/agent.pth")
+},"/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/agent.pth")
 print("Saving replay buffer")
-pickle.dump( D, open("checkpoints/agent.p", "wb" ) )
+pickle.dump( D, open("/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/deque.p", "wb" ) )

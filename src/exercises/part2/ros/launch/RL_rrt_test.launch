@@ -1,0 +1,5 @@
+<launch>
+	<arg name="mode" />
+
+	<node pkg="exercises" type="RL_rrt_test.py" name="RL_rrt_test" output="screen"></node>
+</launch>
