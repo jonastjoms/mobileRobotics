@@ -27,6 +27,7 @@ from decimal import Decimal
 # Robot motion commands:
 # http://docs.ros.org/api/geometry_msgs/html/msg/Twist.html
 from geometry_msgs.msg import Twist
+from sensor_msgs.msg import LaserScan
 # Occupancy grid.
 from nav_msgs.msg import OccupancyGrid
 # Position.
@@ -44,7 +45,7 @@ from std_srvs.srv import Empty
 directory = os.path.join(os.path.dirname(os.path.realpath(__file__)), '../python')
 sys.path.insert(0, directory)
 try:
-  import rrt_improved
+  import rrt_improved as rrt
 except ImportError:
   raise ImportError('Unable to import potential_field.py. Make sure this file is in "{}"'.format(directory))
 
@@ -53,61 +54,116 @@ EPSILON = .1
 X = 0
 Y = 1
 YAW = 2
-# Reset simulation service:
-service = rospy.ServiceProxy('/gazebo/reset_simulation', Empty)
 
 class Observation:
 
     def __init__(self):
-        self.X = 0
-        self.Y = 0
-        self.closest_point_on_path = [0,0]
-        self.next_point_on_path = [0,0]
-        self.state = np.array([self.X, self.Y, self.closest_point_on_path[0], self.closest_point_on_path[1], self.next_point_on_path[0], self.next_point_on_path[1]], dtype=float)
+        self.direction_next_point_on_path = [0,0]
+        self.state = np.array([self.direction_next_point_on_path[0], self.direction_next_point_on_path[1]], dtype=float)
 # Method to get state from observations
     def get_state(self, position, path_points):
-        self.X = position[X]
-        self.Y = position[Y]
         # Create an array where every element is the euclidean distance from the current position to points on the path
         distances = []
         for i, element in enumerate(path_points):
             distances.append(np.linalg.norm(element-position))
         # Shortest distance to that point
         closest_point = np.argmin(distances)
-        self.closest_point_on_path = np.array(path_points)[closest_point]
         if len(path_points) > closest_point + 1:
-            self.next_point_on_path = np.array(path_points)[closest_point+1]
+            self.direction_next_point_on_path = path_points[closest_point + 1] - position
         else:
-            self.next_point_on_path = self.closest_point_on_path
-        self.state = np.array([self.X, self.Y, self.closest_point_on_path[0], self.closest_point_on_path[1], self.next_point_on_path[0], self.next_point_on_path[1]], dtype=float)
+            self.direction_next_point_on_path = path_points[closest_point] - position
+        self.state = np.array([self.direction_next_point_on_path[0], self.direction_next_point_on_path[1]], dtype=float)
 
-def reset(slam):
-    response = service()
-    # Get position of robot and path points here:
-    position = np.array([
-        slam.pose[X] + EPSILON * np.cos(slam.pose[YAW]),
-        slam.pose[Y] + EPSILON * np.sin(slam.pose[YAW])], dtype=np.float)
-    return position
+class SimpleLaser(object):
+  def __init__(self):
+    rospy.Subscriber('/scan', LaserScan, self.callback)
+    self._angles = [0., np.pi / 4., -np.pi / 4., np.pi / 2., -np.pi / 2.]
+    self._width = np.pi / 180. * 10.  # 10 degrees cone of view.
+    self._measurements = [float('inf')] * len(self._angles)
+    self._indices = None
 
-def new_path(slam, goal, frame_id, path_publisher):
-    # Run RRT too find path:
-    start_node, final_node = rrt_improved.rrt(slam.pose, goal.position, slam.occupancy_grid)
+  def callback(self, msg):
+    # Helper for angles.
+    def _within(x, a, b):
+      pi2 = np.pi * 2.
+      x %= pi2
+      a %= pi2
+      b %= pi2
+      if a < b:
+        return a <= x and x <= b
+      return a <= x or x <= b;
+
+    # Compute indices the first time.
+    if self._indices is None:
+      self._indices = [[] for _ in range(len(self._angles))]
+      for i, d in enumerate(msg.ranges):
+        angle = msg.angle_min + i * msg.angle_increment
+        for j, center_angle in enumerate(self._angles):
+          if _within(angle, center_angle - self._width / 2., center_angle + self._width / 2.):
+            self._indices[j].append(i)
+
+    ranges = np.array(msg.ranges)
+    for i, idx in enumerate(self._indices):
+      # We do not take the minimum range of the cone but the 10-th percentile for robustness.
+      self._measurements[i] = np.percentile(ranges[idx], 10)
+
+  @property
+  def ready(self):
+    return not np.isnan(self._measurements[0])
+
+  @property
+  def measurements(self):
+    return self._measurements
+
+def braitenberg(front, front_left, front_right, left, right):
+
+  mask = np.array((1, 0, 0, 0, 0))
+  distances = np.array([4 if el == np.inf else el for el in np.array((front, front_left, front_right, left, right))])
+  u = 0.3*np.tanh(front-0.3)
+  w = np.sum([1.3*distances[1],-1.3*distances[2], distances[3], -distances[4], 0.5*distances[0]]) # [rad/s] going counter-clockwise.
+
+  return u, w
+
+def reset(laser, stop_msg, publisher, slam, goal, path_publisher, frame_id):
+    publisher.publish(stop_msg)
+    counter = 0
+    # Use braitenberg to make sure robot is free from obstacles
+    while counter < 100:
+        # Make sure all measurements are ready.
+        if not laser.ready or not slam.ready:
+          rospy.Rate(200).sleep()
+          continue
+        slam.update()
+        u, w = braitenberg(*laser.measurements)
+        vel_msg = Twist()
+        vel_msg.linear.x = u
+        vel_msg.angular.z = w
+        publisher.publish(vel_msg)
+        counter += 1
+    publisher.publish(stop_msg)
+    #Find new path
+    start_node, final_node = rrt.rrt(slam.pose, goal.position, slam.occupancy_grid)
     current_path = get_path(final_node)
-    if not current_path:
-      print('Unable to reach goal position:', goal.position)
+    #Run RRT too find path:
+    while not current_path:
+        start_node, final_node = rrt.rrt(slam.pose, goal.position, slam.occupancy_grid)
+        current_path = get_path(final_node)
+        if not current_path:
+          print('Unable to reach goal position:', goal.position)
+          continue
     # Publish path
     path_msg = Path()
     path_msg.header.seq = frame_id
     path_msg.header.stamp = rospy.Time.now()
     path_msg.header.frame_id = 'map'
     for u in current_path:
-      pose_msg = PoseStamped()
-      pose_msg.header.seq = frame_id
-      pose_msg.header.stamp = path_msg.header.stamp
-      pose_msg.header.frame_id = 'map'
-      pose_msg.pose.position.x = u[X]
-      pose_msg.pose.position.y = u[Y]
-      path_msg.poses.append(pose_msg)
+        pose_msg = PoseStamped()
+        pose_msg.header.seq = frame_id
+        pose_msg.header.stamp = path_msg.header.stamp
+        pose_msg.header.frame_id = 'map'
+        pose_msg.pose.position.x = u[X]
+        pose_msg.pose.position.y = u[Y]
+        path_msg.poses.append(pose_msg)
     path_publisher.publish(path_msg)
     return current_path
 
@@ -124,24 +180,46 @@ def feedback_linearized(pose, velocity, epsilon):
 
   return u, w
 
+def get_velocity(position, path_points):
+  v = np.zeros_like(position)
+  if len(path_points) == 0:
+    return v
+  # Stop moving if the goal is reached.
+  if np.linalg.norm(position - path_points[-1]) < .2:
+    return v
+  # Create an array where every element is the euclidean distance from the current position to points on the path
+  distances = []
+  for i, element in enumerate(path_points):
+      distances.append(np.linalg.norm(element-position))
+  # Shortest distance
+  closest_point = np.argmin(distances)
+  # Set veloccity towards next point in path_points
+  if len(path_points) > closest_point+1:
+      v = path_points[closest_point+1] - position
+  else:
+      v = path_points[closest_point] - position
+  # Scale v
+  v = 5*v
+  return v
+
 # Leave as is
 class SLAM(object):
   def __init__(self):
     rospy.Subscriber('/map', OccupancyGrid, self.callback)
     self._tf = TransformListener()
     self._occupancy_grid = None
-    self._pose = np.array([np.nan, np.nan, np.nan], dtype=np.float)
+    self._pose = np.array([np.nan, np.nan, np.nan], dtype=np.float32)
 
   def callback(self, msg):
     values = np.array(msg.data, dtype=np.int8).reshape((msg.info.width, msg.info.height))
     processed = np.empty_like(values)
-    processed[:] = rrt_improved.FREE
-    processed[values < 0] = rrt_improved.UNKNOWN
-    processed[values > 50] = rrt_improved.OCCUPIED
+    processed[:] = rrt.FREE
+    processed[values < 0] = rrt.UNKNOWN
+    processed[values > 50] = rrt.OCCUPIED
     processed = processed.T
     origin = [msg.info.origin.position.x, msg.info.origin.position.y, 0.]
     resolution = msg.info.resolution
-    self._occupancy_grid = rrt_improved.OccupancyGrid(processed, origin, resolution)
+    self._occupancy_grid = rrt.OccupancyGrid(processed, origin, resolution)
 
   def update(self):
     # Get pose w.r.t. map.
@@ -175,7 +253,7 @@ class SLAM(object):
 class GoalPose(object):
   def __init__(self):
     rospy.Subscriber('/move_base_simple/goal', PoseStamped, self.callback)
-    self._position = np.array([np.nan, np.nan], dtype=np.float)
+    self._position = np.array([np.nan, np.nan], dtype=np.float32)
 
   def callback(self, msg):
     # The pose from RViz is with respect to the "map".
@@ -207,7 +285,7 @@ def get_path(final_node):
   points_x = []
   points_y = []
   for u, v in zip(path, path[1:]):
-    center, radius = rrt_improved.find_circle(u, v)
+    center, radius = rrt.find_circle(u, v)
     du = u.position - center
     theta1 = np.arctan2(du[1], du[0])
     dv = v.position - center
@@ -231,9 +309,10 @@ def get_path(final_node):
     points_y.extend(center[Y] + np.sin(angles) * radius)
   return zip(points_x, points_y)
 
+
 # Here the fun part goes:
 def run(args):
-  rospy.init_node('RL_rrt')
+  rospy.init_node('RL_rrt_testing')
 
   # Torch initialisations
   obs = Observation()
@@ -258,9 +337,9 @@ def run(args):
   path_publisher = rospy.Publisher('/path', Path, queue_size=1)
   slam = SLAM()
   goal = GoalPose()
+  laser = SimpleLaser()
   frame_id = 0
   current_path = []
-  previous_time = rospy.Time.now().to_sec()
   # Stop moving message.
   stop_msg = Twist()
   stop_msg.linear.x = 0.
@@ -272,96 +351,108 @@ def run(args):
     publisher.publish(stop_msg)
     rate_limiter.sleep()
     i += 1
-  while not rospy.is_shutdown():
+
+  # Make sure all measurements are ready.
+  # Get map and current position through SLAM:
+  # > roslaunch exercises slam.launch
+  while not goal.ready or not slam.ready:
     slam.update()
-    current_time = rospy.Time.now().to_sec()
+    rate_limiter.sleep()
+    continue
 
-    # Make sure all measurements are ready.
-    # Get map and current position through SLAM:
-    # > roslaunch exercises slam.launch
-    if not goal.ready or not slam.ready:
-      rate_limiter.sleep()
-      continue
-    goal_reached = np.linalg.norm(slam.pose[:2] - goal.position) < .2
-    if goal_reached:
-      publisher.publish(stop_msg)
-      rate_limiter.sleep()
-      continue
+  # Find path
+  # Run RRT too find path:
+  while not current_path:
+      start_node, final_node = rrt.rrt(slam.pose, goal.position, slam.occupancy_grid)
+      current_path = get_path(final_node)
+      if not current_path:
+        print('Unable to reach goal position:', goal.position)
+        continue
+      # Publish path
+      path_msg = Path()
+      path_msg.header.seq = frame_id
+      path_msg.header.stamp = rospy.Time.now()
+      path_msg.header.frame_id = 'map'
+      for u in current_path:
+        pose_msg = PoseStamped()
+        pose_msg.header.seq = frame_id
+        pose_msg.header.stamp = path_msg.header.stamp
+        pose_msg.header.frame_id = 'map'
+        pose_msg.pose.position.x = u[X]
+        pose_msg.pose.position.y = u[Y]
+        path_msg.poses.append(pose_msg)
+      path_publisher.publish(path_msg)
 
-    # Reset and get observation:
-    position = reset(slam)
-    current_path = new_path(slam, goal, frame_id, path_publisher)
-    obs.get_state(position, current_path)
-    state = torch.tensor(obs.state).float().to(device)
+  # Distance to goal:
+  goal_reached = np.linalg.norm(slam.pose[:2] - goal.position) < .2
+  while not goal_reached:
+      try:
+          with torch.no_grad():
+              slam.update()
+              # Get state:
+              position = np.array([
+                  slam.pose[X] + EPSILON * np.cos(slam.pose[YAW]),
+                  slam.pose[Y] + EPSILON * np.sin(slam.pose[YAW])], dtype=np.float32)
+              obs.get_state(position, current_path)
+              state = torch.tensor(obs.state).float().to(device)
+              action = actor(state.unsqueeze(0)).mean # Exploit!!
+              # Scale action so that we don't reach max = 0.5
+              action = action/2
+              print(action)
+              # Get forward and rotational velocity:
+              #u, w = feedback_linearized(slam.pose, action.numpy()[0], epsilon=EPSILON)
+              u = action.numpy()[0][0]
+              w = action.numpy()[0][1]
+              # Execute action:
+              vel_msg = Twist()
+              vel_msg.linear.x = u
+              vel_msg.angular.z = w
+              publisher.publish(vel_msg)
 
-    while not goal_reached:
-        try:
-            with torch.no_grad():
-                slam.update()
-                # Get state:
-                position = np.array([
-                    slam.pose[X] + EPSILON * np.cos(slam.pose[YAW]),
-                    slam.pose[Y] + EPSILON * np.sin(slam.pose[YAW])], dtype=np.float32)
-                obs.get_state(position, current_path)
-                state = torch.tensor(obs.state).float().to(device)
-                current_time = rospy.Time.now().to_sec()
-                action = actor(state.unsqueeze(0)).mean # Exploit!!
-                # Scale action so that we don't reach max = 0.5
-                action = action/2
-                # Get forward and rotational velocity:
-                #u, w = feedback_linearized(slam.pose, action.numpy()[0], epsilon=EPSILON)
-                u = action.numpy()[0][0]
-                w = action.numpy()[0][1]
-                # Execute action:
-                vel_msg = Twist()
-                vel_msg.linear.x = u
-                vel_msg.angular.z = w
-                publisher.publish(vel_msg)
+              # Get current time and set delay
+              T1 = rospy.get_rostime()
 
-                # Get current time and set delay
-                T1 = rospy.get_rostime()
-                rospy.sleep(0.05)
-                # Check if action has been executed long enough
-                T2 = rospy.get_rostime()
-                while (T2-T1) < rospy.Duration.from_sec(0.2):
-                    try:
-                        T2 = rospy.get_rostime()
-                        continue
-                    except KeyboardInterrupt:
-                        break
+              # Check if action has been executed long enough
+              T2 = rospy.get_rostime()
+              while (T2-T1) < rospy.Duration.from_sec(0.2):
+                  try:
+                      T2 = rospy.get_rostime()
+                      continue
+                  except KeyboardInterrupt:
+                      break
 
-                # Action executed now calculate reward
-                slam.update()
-                position = np.array([
-                    slam.pose[X] + EPSILON * np.cos(slam.pose[YAW]),
-                    slam.pose[Y] + EPSILON * np.sin(slam.pose[YAW])], dtype=np.float32)
-                obs.get_state(position, current_path)
-                next_state = torch.tensor(obs.state).float().to(device)
-                # Reward, two parts: (Distance to next point on path)
-                reward = - 3*np.linalg.norm(obs.next_point_on_path-position)
-                # (Difference in path direction, and robot direction, only included when almost on path
-                robot_direction = np.array([np.cos(slam.pose[YAW]), np.sin(slam.pose[YAW])], dtype=np.float32)
-                robot_direction = robot_direction/np.linalg.norm(robot_direction)
-                path_direction = obs.next_point_on_path - obs.closest_point_on_path
-                path_direction = path_direction/np.linalg.norm(path_direction)
-                # Get angle between:
-                angle_between = np.arccos(np.clip(np.dot(robot_direction,path_direction), -1.0,1.0))
-                if np.abs(reward/3) < 0.1:
-                    reward -= angle_between
-                reward_sum += reward
-                state = next_state
-                # Distance to goal:
-                goal_reached = np.linalg.norm(slam.pose[:2] - goal.position) < .3
-                # Check if Done
-                if goal_reached:
+              # Action executed now calculate reward
+              slam.update()
+              position = np.array([
+                  slam.pose[X] + EPSILON * np.cos(slam.pose[YAW]),
+                  slam.pose[Y] + EPSILON * np.sin(slam.pose[YAW])], dtype=np.float32)
+              obs.get_state(position, current_path)
+              next_state = torch.tensor(obs.state).float().to(device)
+              # Reward
+              # Dist to next point
+              dist = np.linalg.norm(obs.direction_next_point_on_path)
+              reward = - 3*dist
+              reward_sum += reward
+
+              # Distance to goal:
+              goal_reached = np.linalg.norm(slam.pose[:2] - goal.position) < .2
+              # Check if Done
+              if goal_reached:
+                  # Stop robot
+                  i = 0
+                  while i < 10 and not rospy.is_shutdown():
                     publisher.publish(stop_msg)
                     rate_limiter.sleep()
-                    rospy.signl_shutdown("Done")
+                    i += 1
+                  rospy.signl_shutdown("Done, goal reached")
 
-            torch.cuda.empty_cache()
-            frame_id += 1
-        except KeyboardInterrupt:
-            break
+          torch.cuda.empty_cache()
+          frame_id += 1
+
+      except KeyboardInterrupt:
+          break
+      except rospy.ROSTimeMovedBackwardsException:
+          continue
 
 if __name__ == '__main__':
   parser = argparse.ArgumentParser(description='Runs RL RRT navigation')

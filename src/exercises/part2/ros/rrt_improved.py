@@ -73,8 +73,6 @@ def adjust_pose(node, final_position, occupancy_grid):
       final_node = None
   return final_node
 
-
-
 # Defines an occupancy grid.
 class OccupancyGrid(object):
   def __init__(self, values, origin, resolution):
@@ -129,7 +127,6 @@ class OccupancyGrid(object):
 
   def is_free(self, position):
     return self._values[self.get_index(position)] == FREE
-
 
 # Defines a node of the graph.
 class Node(object):
