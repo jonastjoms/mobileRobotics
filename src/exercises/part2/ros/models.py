@@ -97,7 +97,7 @@ class ActorCritic(nn.Module):
 class DQN(nn.Module):
   def __init__(self, hidden_size, num_actions=5):
     super(DQN, self).__init__()
-    layers = [nn.Linear(3, hidden_size), nn.Tanh(), nn.Linear(hidden_size, hidden_size), nn.Tanh(), nn.Linear(hidden_size, num_actions)]
+    layers = [nn.Linear(2, hidden_size), nn.Tanh(), nn.Linear(hidden_size, hidden_size), nn.Tanh(), nn.Linear(hidden_size, num_actions)]
     self.dqn = nn.Sequential(*layers)
 
   def forward(self, state):

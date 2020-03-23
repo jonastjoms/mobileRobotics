@@ -116,6 +116,7 @@
       </visual>
       <pose frame=''>0.3 0.2 0 0 0 0</pose>
     </link>
+    
     <static>1</static>
   </model>
 </sdf>

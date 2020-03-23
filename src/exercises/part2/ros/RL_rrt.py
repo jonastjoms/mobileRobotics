@@ -55,25 +55,28 @@ X = 0
 Y = 1
 YAW = 2
 resuming = True
+testing = False
 
 class Observation:
 
     def __init__(self):
-        self.direction_next_point_on_path = [0,0]
-        self.state = np.array([self.direction_next_point_on_path[0], self.direction_next_point_on_path[1]], dtype=float)
+        self.direction_subgoal_x = 0
+        self.direction_subgoal_y = 0
+        #self.robot_rotation_x = 0
+        #self.robot_rotation_y = 0
+        #self.state = np.array([self.direction_subgoal_x, self.direction_subgoal_y, self.robot_rotation_x, self.robot_rotation_y], dtype=float)
+        self.state = np.array([self.direction_subgoal_x, self.direction_subgoal_y], dtype=float)
+
 # Method to get state from observations
-    def get_state(self, position, path_points):
-        # Create an array where every element is the euclidean distance from the current position to points on the path
-        distances = []
-        for i, element in enumerate(path_points):
-            distances.append(np.linalg.norm(element-position))
-        # Shortest distance to that point
-        closest_point = np.argmin(distances)
-        if len(path_points) > closest_point + 1:
-            self.direction_next_point_on_path = path_points[closest_point + 1] - position
-        else:
-            self.direction_next_point_on_path = path_points[closest_point] - position
-        self.state = np.array([self.direction_next_point_on_path[0], self.direction_next_point_on_path[1]], dtype=float)
+    def get_state(self, position, subgoal):
+        direction_to_subgoal = subgoal.position-position
+        self.direction_subgoal_x = direction_to_subgoal[X]
+        self.direction_subgoal_y = direction_to_subgoal[Y]
+        #self.robot_rotation_x = np.cos(pose[2])
+        #self.robot_rotation_y = np.sin(pose[2])
+        # Set state
+        #self.state = np.array([self.direction_subgoal_x, self.direction_subgoal_y, self.robot_rotation_x, self.robot_rotation_y], dtype=float)
+        self.state = np.array([self.direction_subgoal_x, self.direction_subgoal_y], dtype=float)
 
 class SimpleLaser(object):
   def __init__(self):
@@ -127,6 +130,7 @@ def braitenberg(front, front_left, front_right, left, right):
 
 def reset(laser, stop_msg, publisher, slam, goal, path_publisher, frame_id):
     publisher.publish(stop_msg)
+    slam.update()
     while not goal.ready or not slam.ready:
       slam.update()
       rate_limiter.sleep()
@@ -160,15 +164,9 @@ def reset(laser, stop_msg, publisher, slam, goal, path_publisher, frame_id):
           counter = 0
           # Use braitenberg to make sure robot is free from obstacles
           while counter < 100:
-              # Make sure all measurements are ready.
-              if not laser.ready or not slam.ready:
-                rospy.Rate(200).sleep()
-                continue
-              slam.update()
-              u, w = braitenberg(*laser.measurements)
               vel_msg = Twist()
-              vel_msg.linear.x = u
-              vel_msg.angular.z = w
+              vel_msg.linear.x = -1
+              vel_msg.angular.z = 0
               publisher.publish(vel_msg)
               counter += 1
           continue
@@ -189,16 +187,8 @@ def reset(laser, stop_msg, publisher, slam, goal, path_publisher, frame_id):
     return current_path
 
 def feedback_linearized(pose, velocity, epsilon):
-  # Get theta_dot
-  theta_dot = np.arctan2(velocity[Y], velocity[X])-pose[YAW]
-  # Arctan2 gives angles from -pi to pi, must handle
-  theta_dot = np.mod(theta_dot + np.pi, 2*np.pi)-np.pi
-  # Feedback linearization:
-  x_p_dot = velocity[X] + epsilon*(-theta_dot*np.sin(pose[YAW]))
-  y_p_dot = velocity[Y] + epsilon*(theta_dot*np.cos(pose[YAW]))
-  u = x_p_dot*np.cos(pose[YAW]) + y_p_dot*np.sin(pose[YAW])  # [m/s]
-  w = (1/epsilon)*(-x_p_dot*np.sin(pose[YAW])+ y_p_dot*np.cos(pose[YAW]))  # [rad/s] going counter-clockwise.
-
+  u = velocity[X]*np.cos(pose[YAW]) + velocity[Y]*np.sin(pose[YAW])  # [m/s]
+  w = (1/epsilon)*(-velocity[X]*np.sin(pose[YAW]) + velocity[Y]*np.cos(pose[YAW]))  # [rad/s] going counter-clockwise.
   return u, w
 
 def get_velocity(position, path_points):
@@ -290,6 +280,15 @@ class GoalPose(object):
   def position(self):
     return self._position
 
+class SubGoal():
+    def __init__(self):
+      self.position = np.array([np.nan, np.nan], dtype=np.float32)
+      self.path_pointer = 0
+
+    def set_position(self, position):
+        self.position[X] = position[X]
+        self.position[Y] = position[Y]
+
 # Leave as is
 def get_path(final_node):
   # Construct path from RRT solution.
@@ -332,293 +331,319 @@ def get_path(final_node):
 
 # Here the fun part goes:
 def run(args):
-  rospy.init_node('RL_rrt_training')
+    rospy.init_node('RL_rrt_training')
 
-  # Torch initialisations
-  obs = Observation()
-  device = torch.device("cuda" if torch.cuda.is_available() else "cpu" )
-  state = torch.tensor(obs.state, dtype=torch.float32).to(device)
-  done = False
-  rewards = []
-  reward_sum = 0
-  first_update = True
+    # Torch initialisations
+    obs = Observation()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu" )
+    state = torch.tensor(obs.state, dtype=torch.float32).to(device)
+    done = False
+    # Update this between trials
+    trial = 0
+    episode = 0
+    episode_reward = 0
+    episode_error = 0
+    rewards = {}
+    errors = {}
+    reward_sum = 0
+    episode_step = 1
+    first_update = True
 
-  # SAC initialisations
-  rewards = []
-  action_space = 2
-  state_space = 3
-  actor = SoftActor(HIDDEN_SIZE).to(device)
-  critic_1 = Critic(HIDDEN_SIZE, state_action=True).to(device)
-  critic_2 = Critic(HIDDEN_SIZE, state_action=True).to(device)
-  value_critic = Critic(HIDDEN_SIZE).to(device)
-  if resuming:
-      print("Loading models")
-      checkpoint = torch.load("/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/agent.pth")
-      actor.load_state_dict(checkpoint['actor_state_dict'])
-      critic_1.load_state_dict(checkpoint['critic_1_state_dict'])
-      critic_2.load_state_dict(checkpoint['critic_2_state_dict'])
-      value_critic.load_state_dict(checkpoint['value_critic_state_dict'])
-      UPDATE_START = 1
+    # SAC initialisations
+    action_space = 2
+    state_space = 3
+    actor = SoftActor(HIDDEN_SIZE).to(device)
+    critic_1 = Critic(HIDDEN_SIZE, state_action=True).to(device)
+    critic_2 = Critic(HIDDEN_SIZE, state_action=True).to(device)
+    value_critic = Critic(HIDDEN_SIZE).to(device)
+    if resuming:
+        print("Loading models")
+        checkpoint = torch.load("/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/agent2.pth")
+        actor.load_state_dict(checkpoint['actor_state_dict'])
+        critic_1.load_state_dict(checkpoint['critic_1_state_dict'])
+        critic_2.load_state_dict(checkpoint['critic_2_state_dict'])
+        value_critic.load_state_dict(checkpoint['value_critic_state_dict'])
+        UPDATE_START = 0
 
-  target_value_critic = create_target_network(value_critic).to(device)
-  actor_optimiser = optim.Adam(actor.parameters(), lr=LEARNING_RATE)
-  critics_optimiser = optim.Adam(list(critic_1.parameters()) + list(critic_2.parameters()), lr=LEARNING_RATE)
-  value_critic_optimiser = optim.Adam(value_critic.parameters(), lr=LEARNING_RATE)
-  D = deque(maxlen=REPLAY_SIZE)
-  # Automatic entropy tuning init
-  target_entropy = -np.prod(action_space).item()
-  log_alpha = torch.zeros(1, requires_grad=True, device=device)
-  alpha_optimizer = optim.Adam([log_alpha], lr=LEARNING_RATE)
+    target_value_critic = create_target_network(value_critic).to(device)
+    actor_optimiser = optim.Adam(actor.parameters(), lr=LEARNING_RATE)
+    critics_optimiser = optim.Adam(list(critic_1.parameters()) + list(critic_2.parameters()), lr=LEARNING_RATE)
+    value_critic_optimiser = optim.Adam(value_critic.parameters(), lr=LEARNING_RATE)
+    D = deque(maxlen=REPLAY_SIZE)
+    # Automatic entropy tuning init
+    target_entropy = -np.prod(action_space).item()
+    log_alpha = torch.zeros(1, requires_grad=True, device=device)
+    alpha_optimizer = optim.Adam([log_alpha], lr=LEARNING_RATE)
 
-  # Load models
-  if resuming:
-      target_value_critic.load_state_dict(checkpoint['target_value_critic_state_dict'])
-      actor_optimiser.load_state_dict(checkpoint['actor_optimiser_state_dict'])
-      critics_optimiser.load_state_dict(checkpoint['critics_optimiser_state_dict'])
-      value_critic_optimiser.load_state_dict(checkpoint['value_critic_optimiser_state_dict'])
-      alpha_optimizer.load_state_dict(checkpoint['alpha_optimizer_state_dict'])
-      D = pickle.load( open("/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/deque.p", "rb" ) )
+    # Load models
+    if resuming:
+        target_value_critic.load_state_dict(checkpoint['target_value_critic_state_dict'])
+        actor_optimiser.load_state_dict(checkpoint['actor_optimiser_state_dict'])
+        critics_optimiser.load_state_dict(checkpoint['critics_optimiser_state_dict'])
+        value_critic_optimiser.load_state_dict(checkpoint['value_critic_optimiser_state_dict'])
+        alpha_optimizer.load_state_dict(checkpoint['alpha_optimizer_state_dict'])
+        D = pickle.load( open("/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/deque2.p", "rb" ) )
+        rewards = pickle.load( open("/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/training_rewards2.p", "rb" ) )
+        errors = pickle.load( open("/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/errors2.p", "rb" ) )
 
-  # Other variables
-  reward_sparse = False
-  reward_dense = True
-  pbar = tqdm(xrange(1, MAX_STEPS + 1), unit_scale=1, smoothing=0)
+    # Other variables
+    reward_sparse = True
+    reward_dense = False
+    pbar = tqdm(xrange(1, MAX_STEPS + 1), unit_scale=1, smoothing=0)
 
-  # Update control every 200 ms.
-  rate_limiter = rospy.Rate(200)
-  publisher = rospy.Publisher('/cmd_vel', Twist, queue_size=5)
-  path_publisher = rospy.Publisher('/path', Path, queue_size=1)
-  slam = SLAM()
-  goal = GoalPose()
-  laser = SimpleLaser()
-  frame_id = 0
-  current_path = []
-  # Stop moving message.
-  stop_msg = Twist()
-  stop_msg.linear.x = 0.
-  stop_msg.angular.z = 0.
+    # Update control every 200 ms.
+    rate_limiter = rospy.Rate(200)
+    publisher = rospy.Publisher('/cmd_vel', Twist, queue_size=5)
+    path_publisher = rospy.Publisher('/path', Path, queue_size=1)
+    slam = SLAM()
+    goal = GoalPose()
+    subgoal = SubGoal()
+    laser = SimpleLaser()
+    frame_id = 0
+    current_path = []
+    # Stop moving message.
+    stop_msg = Twist()
+    stop_msg.linear.x = 0.
+    stop_msg.angular.z = 0.
 
-  # Make sure the robot is stopped.
-  i = 0
-  while i < 10 and not rospy.is_shutdown():
-    publisher.publish(stop_msg)
-    rate_limiter.sleep()
-    i += 1
+    # Make sure the robot is stopped.
+    i = 0
+    while i < 10 and not rospy.is_shutdown():
+        publisher.publish(stop_msg)
+        rate_limiter.sleep()
+        i += 1
 
-  # Make sure all measurements are ready.
-  # Get map and current position through SLAM:
-  # > roslaunch exercises slam.launch
-  while not goal.ready or not slam.ready:
-    slam.update()
-    rate_limiter.sleep()
-    continue
-
-  # Find initial path
-  # Run RRT too find path:
-  while not current_path:
-      start_node, final_node = rrt.rrt(slam.pose, goal.position, slam.occupancy_grid)
-      current_path = get_path(final_node)
-      if not current_path:
-        print('Unable to reach goal position:', goal.position)
-        continue
-      # Publish path
-      path_msg = Path()
-      path_msg.header.seq = frame_id
-      path_msg.header.stamp = rospy.Time.now()
-      path_msg.header.frame_id = 'map'
-      for u in current_path:
-        pose_msg = PoseStamped()
-        pose_msg.header.seq = frame_id
-        pose_msg.header.stamp = path_msg.header.stamp
-        pose_msg.header.frame_id = 'map'
-        pose_msg.pose.position.x = u[X]
-        pose_msg.pose.position.y = u[Y]
-        path_msg.poses.append(pose_msg)
-      path_publisher.publish(path_msg)
-
-  # Training loop
-  for step in pbar:
-      slam.update()
-      # Make sure all measurements are ready.
-      # Get map and current position through SLAM:
-      # > roslaunch exercises slam.launch
-      while not goal.ready or not slam.ready:
+    # Make sure all measurements are ready.
+    # Get map and current position through SLAM:
+    # > roslaunch exercises slam.launch
+    while not goal.ready or not slam.ready:
         slam.update()
         rate_limiter.sleep()
-      # RL:
-      try:
-          with torch.no_grad():
-              position = np.array([
-              # Get state:
-                  slam.pose[X] + EPSILON * np.cos(slam.pose[YAW]),
-                  slam.pose[Y] + EPSILON * np.sin(slam.pose[YAW])], dtype=np.float32)
-              obs.get_state(position, current_path)
-              state = torch.tensor(obs.state).float().to(device)
-              current_time = rospy.Time.now().to_sec()
-              # Determine action:
-              if step < UPDATE_START:
-                # To improve exploration take actions sampled from a uniform random distribution over actions at the start of training
-                action = torch.tensor([2 * random.random() - 1, 2 * random.random() - 1], device=device).unsqueeze(0)
-              else:
-                # Observe state s and select action a ~ mu(a|s)
-                action = actor(state.unsqueeze(0)).mean
-              # Scale action so that we don't reach max = 0.5
-              action = action/2
-              # Get forward and rotational velocity:
-              #u, w = feedback_linearized(slam.pose, action.numpy()[0], epsilon=EPSILON)
-              u = action.numpy()[0][0]
-              w = action.numpy()[0][1]
-              # Execute action:
-              vel_msg = Twist()
-              vel_msg.linear.x = u
-              vel_msg.angular.z = w
-              publisher.publish(vel_msg)
+        continue
 
-              # Get current time and set delay
-              T1 = rospy.get_rostime()
-
-          # Starting updates of weights
-          if step > UPDATE_START and step % UPDATE_INTERVAL == 0:
-              if first_update:
-                  print("\nStarting updates")
-                  first_update = False
-              # Randomly sample a batch of transitions B = {(s, a, r, s', d)} from D
-              batch = random.sample(D, BATCH_SIZE)
-              batch = dict((k, torch.cat([d[k] for d in batch], dim=0)) for k in batch[0].keys())
-
-              # Compute targets for Q and V functions
-              y_q = batch['reward'] + DISCOUNT * (1 - batch['done']) * target_value_critic(batch['next_state'])
-              policy = actor(batch['state'])
-              action_update, log_prob = policy.rsample_log_prob()  # a(s) is a sample from mu(:|s) which is differentiable wrt theta via the reparameterisation trick
-              # Automatic entropy tuning
-              alpha_loss = -(log_alpha.float() * (log_prob + target_entropy).float().detach()).mean()
-              alpha_optimizer.zero_grad()
-              alpha_loss.backward()
-              alpha_optimizer.step()
-              alpha = log_alpha.exp()
-              weighted_sample_entropy = (alpha.float() * log_prob).view(-1,1)
-
-              # Weighted_sample_entropy = ENTROPY_WEIGHT * policy.log_prob(action).sum(dim=1)  # Note: in practice it is more numerically stable to calculate the log probability when sampling an action to avoid inverting tanh
-              y_v = torch.min(critic_1(batch['state'], action_update.detach()), critic_2(batch['state'], action_update.detach())) - weighted_sample_entropy.detach()
-
-              # Update Q-functions by one step of gradient descent
-              value_loss = (critic_1(batch['state'], batch['action']) - y_q).pow(2).mean() + (critic_2(batch['state'], batch['action']) - y_q).pow(2).mean()
-              critics_optimiser.zero_grad()
-              value_loss.backward()
-              critics_optimiser.step()
-
-              # Update V-function by one step of gradient descent
-              value_loss = (value_critic(batch['state']) - y_v).pow(2).mean()
-              value_critic_optimiser.zero_grad()
-              value_loss.backward()
-              value_critic_optimiser.step()
-
-              # Update policy by one step of gradient ascent
-              policy_loss = (weighted_sample_entropy - critic_1(batch['state'], action_update)).mean()
-              actor_optimiser.zero_grad()
-              policy_loss.backward()
-              actor_optimiser.step()
-
-              # Update target value network
-              update_target_network(value_critic, target_value_critic, POLYAK_FACTOR)
-
-          # Check if action has been executed long enough
-          T2 = rospy.get_rostime()
-          while (T2-T1) < rospy.Duration.from_sec(0.2):
-              try:
-                  T2 = rospy.get_rostime()
-                  continue
-              except KeyboardInterrupt:
-                  break
-
-          # Action executed now calculate reward
-          slam.update()
-          position = np.array([
-              slam.pose[X] + EPSILON * np.cos(slam.pose[YAW]),
-              slam.pose[Y] + EPSILON * np.sin(slam.pose[YAW])], dtype=np.float32)
-          obs.get_state(position, current_path)
-          next_state = torch.tensor(obs.state).float().to(device)
-          # Reward
-          # Dist to next point
-          dist = np.linalg.norm(obs.direction_next_point_on_path)
-          reward = - 3*dist
-          reward_sum += reward
-
-          # Distance to goal:
-          goal_reached = np.linalg.norm(slam.pose[:2] - goal.position) < .2
-          # Check if Done
-          if (goal_reached or step % 200 == 0):
-              done = True
-              rewards.append(reward_sum)
-              reward_sum = 0
-              # Make sure the robot is stopped.
-              i = 0
-              while i < 10 and not rospy.is_shutdown():
-                publisher.publish(stop_msg)
-                rate_limiter.sleep()
-                i += 1
-              current_path = reset(laser, stop_msg, publisher, slam, goal, path_publisher, frame_id)
-
-          # Store (s, a, r, s', d) in replay buffer D
-          print("state", state.numpy())
-          print("action", action.numpy())
-          print("reward", reward)
-          print("next state", next_state.numpy())
-          #publisher.publish(stop_msg)
-          D.append({'state': state.unsqueeze(0), 'action': action, 'reward': torch.tensor([reward], dtype=torch.float32, device=device), 'next_state': next_state.unsqueeze(0), 'done': torch.tensor([done], dtype=torch.float32, device=device)})
-          state = next_state
-          done = False
-          # Saving policy
-          if step % SAVE_INTERVAL == 0:
-              print(rewards[-1])
-              current_path = reset(laser, stop_msg, publisher, slam, goal, path_publisher, frame_id)
-              done = False
-              torch.save({
-              'actor_state_dict': actor.state_dict(),
-              'critic_1_state_dict': critic_1.state_dict(),
-              'critic_2_state_dict': critic_1.state_dict(),
-              'value_critic_state_dict': value_critic.state_dict(),
-              'target_value_critic_state_dict': target_value_critic.state_dict(),
-              'value_critic_optimiser_state_dict': value_critic_optimiser.state_dict(),
-              'actor_optimiser_state_dict': actor_optimiser.state_dict(),
-              'critics_optimiser_state_dict': critics_optimiser.state_dict(),
-              'alpha_optimizer_state_dict': alpha_optimizer.state_dict(),
-              },"/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/agent.pth")
-              print("Saving replay buffer")
-              pickle.dump( D, open( "/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/deque.p", "wb" ) )
-
-          # Update plan every 600 step.
-          if step % 600 == 0:
-              # Run RRT.
-              start_node, final_node = rrt.rrt(slam.pose, goal.position, slam.occupancy_grid)
-              old_path = current_path
-              current_path = get_path(final_node)
-              if not current_path:
-                print('Unable to reach goal position:', goal.position)
-                current_path = old_path
-              # Publish path to RViz.
-              path_msg = Path()
-              path_msg.header.seq = frame_id
-              path_msg.header.stamp = rospy.Time.now()
-              path_msg.header.frame_id = 'map'
-              for u in current_path:
-                pose_msg = PoseStamped()
-                pose_msg.header.seq = frame_id
-                pose_msg.header.stamp = path_msg.header.stamp
-                pose_msg.header.frame_id = 'map'
-                pose_msg.pose.position.x = u[X]
-                pose_msg.pose.position.y = u[Y]
-                path_msg.poses.append(pose_msg)
-              path_publisher.publish(path_msg)
-
-
-          torch.cuda.empty_cache()
-          frame_id += 1
-
-      except KeyboardInterrupt:
-          break
-      except rospy.ROSTimeMovedBackwardsException:
+    # Find initial path
+    # Run RRT too find path:
+    while not current_path:
+        start_node, final_node = rrt.rrt(slam.pose, goal.position, slam.occupancy_grid)
+        current_path = get_path(final_node)
+        if not current_path:
+          print('Unable to reach goal position:', goal.position)
+          current_path = reset(laser, stop_msg, publisher, slam, goal, path_publisher, frame_id)
           continue
+        # Publish path
+        path_msg = Path()
+        path_msg.header.seq = frame_id
+        path_msg.header.stamp = rospy.Time.now()
+        path_msg.header.frame_id = 'map'
+        for u in current_path:
+          pose_msg = PoseStamped()
+          pose_msg.header.seq = frame_id
+          pose_msg.header.stamp = path_msg.header.stamp
+          pose_msg.header.frame_id = 'map'
+          pose_msg.pose.position.x = u[X]
+          pose_msg.pose.position.y = u[Y]
+          path_msg.poses.append(pose_msg)
+        path_publisher.publish(path_msg)
+
+    # Set initial subgoal position, 4 path points away, because of feedback linearization
+    subgoal.path_pointer = 4
+    subgoal.set_position(np.array(current_path[subgoal.path_pointer]))
+
+
+    # Training loop
+    for step in pbar:
+        slam.update()
+        # Make sure all measurements are ready.
+        # Get map and current position through SLAM:
+        # > roslaunch exercises slam.launch
+        while not goal.ready or not slam.ready:
+            slam.update()
+            rate_limiter.sleep()
+        # RL:
+        try:
+            with torch.no_grad():
+                # Get state:
+                position = np.array([
+                    slam.pose[X] + EPSILON * np.cos(slam.pose[YAW]),
+                    slam.pose[Y] + EPSILON * np.sin(slam.pose[YAW])], dtype=np.float32)
+                obs.get_state(position, subgoal)
+                state = torch.tensor(obs.state).float().to(device)
+                # Determine action:
+                if step < UPDATE_START:
+                    # To improve exploration take actions sampled from a uniform random distribution over actions at the start of training
+                    action = torch.tensor([2 * random.random() - 1, 2 * random.random() - 1], device=device).unsqueeze(0)
+                else:
+                    # Observe state s and select action a ~ mu(a|s)
+                    action = actor(state.unsqueeze(0)).sample()
+                # Scale action so that we don't reach max = 0.5
+                action = action/2
+                # Get forward and rotational velocity:
+                #u, w = feedback_linearized(slam.pose, action.numpy()[0], epsilon=EPSILON)
+                u = action.numpy()[0][0]
+                w = action.numpy()[0][1]/2
+                # Execute action:
+                vel_msg = Twist()
+                vel_msg.linear.x = u
+                vel_msg.angular.z = w
+                publisher.publish(vel_msg)
+
+                # Get current time and set delay
+                T1 = rospy.get_rostime()
+
+            # Starting updates of weights
+            if step > UPDATE_START and step % UPDATE_INTERVAL == 0:
+                if first_update:
+                    print("\nStarting updates")
+                    first_update = False
+                # Randomly sample a batch of transitions B = {(s, a, r, s', d)} from D
+                batch = random.sample(D, BATCH_SIZE)
+                batch = dict((k, torch.cat([d[k] for d in batch], dim=0)) for k in batch[0].keys())
+
+                # Compute targets for Q and V functions
+                y_q = batch['reward'] + DISCOUNT * (1 - batch['done']) * target_value_critic(batch['next_state'])
+                policy = actor(batch['state'])
+                action_update, log_prob = policy.rsample_log_prob()  # a(s) is a sample from mu(:|s) which is differentiable wrt theta via the reparameterisation trick
+                # Automatic entropy tuning
+                alpha_loss = -(log_alpha.float() * (log_prob + target_entropy).float().detach()).mean()
+                alpha_optimizer.zero_grad()
+                alpha_loss.backward()
+                alpha_optimizer.step()
+                alpha = log_alpha.exp()
+                weighted_sample_entropy = (alpha.float() * log_prob).view(-1,1)
+
+                # Weighted_sample_entropy = ENTROPY_WEIGHT * policy.log_prob(action).sum(dim=1)  # Note: in practice it is more numerically stable to calculate the log probability when sampling an action to avoid inverting tanh
+                y_v = torch.min(critic_1(batch['state'], action_update.detach()), critic_2(batch['state'], action_update.detach())) - weighted_sample_entropy.detach()
+
+                # Update Q-functions by one step of gradient descent
+                value_loss = (critic_1(batch['state'], batch['action']) - y_q).pow(2).mean() + (critic_2(batch['state'], batch['action']) - y_q).pow(2).mean()
+                critics_optimiser.zero_grad()
+                value_loss.backward()
+                critics_optimiser.step()
+
+                # Update V-function by one step of gradient descent
+                value_loss = (value_critic(batch['state']) - y_v).pow(2).mean()
+                value_critic_optimiser.zero_grad()
+                value_loss.backward()
+                value_critic_optimiser.step()
+
+                # Update policy by one step of gradient ascent
+                policy_loss = (weighted_sample_entropy - critic_1(batch['state'], action_update)).mean()
+                actor_optimiser.zero_grad()
+                policy_loss.backward()
+                actor_optimiser.step()
+
+                # Update target value network
+                update_target_network(value_critic, target_value_critic, POLYAK_FACTOR)
+
+            # Check if action has been executed long enough
+            T2 = rospy.get_rostime()
+            while (T2-T1) < rospy.Duration.from_sec(0.3):
+                try:
+                    T2 = rospy.get_rostime()
+                    continue
+                except KeyboardInterrupt:
+                    break
+
+            # Action executed now calculate reward
+            slam.update()
+            position = np.array([
+                slam.pose[X] + EPSILON * np.cos(slam.pose[YAW]),
+                slam.pose[Y] + EPSILON * np.sin(slam.pose[YAW])], dtype=np.float32)
+            obs.get_state(position, subgoal)
+            next_state = torch.tensor(obs.state).float().to(device)
+            # Distance to end goal:
+            goal_reached = np.linalg.norm(goal.position-position) < .2
+            # Check if reached final goal or final step in episode
+            if (goal_reached or step % 200 == 0):
+                done = True
+                if goal_reached:
+                    reward = 1
+                else:
+                    reward = -1
+                episode_reward += reward
+                if not testing:
+                    key = episode
+                    rewards[key] = episode_reward/episode_step
+                    errors[key] = episode_error/episode_step
+                    episode_reward = 0
+                    episode_error = 0
+                    episode_step = 0
+                episode += 1
+                # Make sure the robot is stopped.
+                i = 0
+                while i < 10 and not rospy.is_shutdown():
+                  publisher.publish(stop_msg)
+                  rate_limiter.sleep()
+                  i += 1
+                if testing:
+                    rospy.signal_shutdown("Done")
+                    break
+                current_path = reset(laser, stop_msg, publisher, slam, goal, path_publisher, frame_id)
+                # Update subgoal
+                subgoal.path_pointer = 4
+                subgoal.set_position(np.array(current_path[subgoal.path_pointer]))
+
+            # Check whether subgoal reached and must be updated
+            sub_goal_reached = np.linalg.norm(subgoal.position-position) < 0.08
+            if (sub_goal_reached and step % 200 != 0):
+                done = True
+                print("")
+                print("Goal reached at: ", state)
+                reward = 5
+                # Update subgoal
+                subgoal.path_pointer += 2
+                # Handle end of path:
+                if subgoal.path_pointer > len(current_path) - 1:
+                    subgoal.path_pointer = len(current_path) - 1
+                # Set new subgoal
+                subgoal.set_position(np.array(current_path[subgoal.path_pointer]))
+            else:
+                reward = -1
+
+            # Calculate error as distance to subgoal closest point on path
+            error = np.linalg.norm(subgoal.position-position)
+
+            episode_reward += reward
+            episode_error += error
+            episode_step += 1
+
+            # Store (s, a, r, s', d) in replay buffer D
+            #print("")
+            #print("state", state.numpy())
+            #print("Pos", position)
+            #print("SubGoal", subgoal.position)
+            #print("action", action.numpy())
+            #print("reward", reward)
+            #print("next state", next_state.numpy())
+            D.append({'state': state.unsqueeze(0), 'action': action, 'reward': torch.tensor([reward], dtype=torch.float32, device=device), 'next_state': next_state.unsqueeze(0), 'done': torch.tensor([done], dtype=torch.float32, device=device)})
+            done = False
+            # Saving policy
+            if step % SAVE_INTERVAL == 0:
+                current_path = reset(laser, stop_msg, publisher, slam, goal, path_publisher, frame_id)
+                done = False
+                torch.save({
+                'actor_state_dict': actor.state_dict(),
+                'critic_1_state_dict': critic_1.state_dict(),
+                'critic_2_state_dict': critic_1.state_dict(),
+                'value_critic_state_dict': value_critic.state_dict(),
+                'target_value_critic_state_dict': target_value_critic.state_dict(),
+                'value_critic_optimiser_state_dict': value_critic_optimiser.state_dict(),
+                'actor_optimiser_state_dict': actor_optimiser.state_dict(),
+                'critics_optimiser_state_dict': critics_optimiser.state_dict(),
+                'alpha_optimizer_state_dict': alpha_optimizer.state_dict(),
+                },"/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/agent2.pth")
+                print("Saving replay buffer")
+                pickle.dump( D, open( "/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/deque2.p", "wb" ) )
+                pickle.dump( rewards, open( "/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/training_rewards2.p", "wb" ) )
+                pickle.dump( errors, open( "/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/errors2.p", "wb" ) )
+
+            torch.cuda.empty_cache()
+            frame_id += 1
+
+        except KeyboardInterrupt:
+            break
+        except rospy.ROSTimeMovedBackwardsException:
+            continue
 
 
 if __name__ == '__main__':
