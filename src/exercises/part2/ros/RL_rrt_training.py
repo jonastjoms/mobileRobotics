@@ -30,9 +30,9 @@ actor = SoftActor(HIDDEN_SIZE).to(device)
 critic_1 = Critic(HIDDEN_SIZE, state_action=True).to(device)
 critic_2 = Critic(HIDDEN_SIZE, state_action=True).to(device)
 value_critic = Critic(HIDDEN_SIZE).to(device)
-if os.path.isfile("/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/agent2.pth"):
+if os.path.isfile("/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/agent_extension.pth"):
     print("Loading models")
-    checkpoint = torch.load("/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/agent2.pth")
+    checkpoint = torch.load("/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/agent_extension.pth")
     actor.load_state_dict(checkpoint['actor_state_dict'])
     critic_1.load_state_dict(checkpoint['critic_1_state_dict'])
     critic_2.load_state_dict(checkpoint['critic_2_state_dict'])
@@ -51,15 +51,15 @@ log_alpha = torch.zeros(1, requires_grad=True, device=device)
 alpha_optimizer = optim.Adam([log_alpha], lr=LEARNING_RATE)
 
 # Load models
-if os.path.isfile("/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/agent2.pth"):
+if os.path.isfile("/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/agent_extension.pth"):
     target_value_critic.load_state_dict(checkpoint['target_value_critic_state_dict'])
     actor_optimiser.load_state_dict(checkpoint['actor_optimiser_state_dict'])
     critics_optimiser.load_state_dict(checkpoint['critics_optimiser_state_dict'])
     value_critic_optimiser.load_state_dict(checkpoint['value_critic_optimiser_state_dict'])
     alpha_optimizer.load_state_dict(checkpoint['alpha_optimizer_state_dict'])
-    D = pickle.load( open("/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/deque2.p", "rb" ) )
+    D = pickle.load( open("/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/deque_extension.p", "rb" ) )
 
-pbar = tqdm(xrange(1, 20000 + 1), unit_scale=1, smoothing=0)
+pbar = tqdm(xrange(1, 200000 + 1), unit_scale=1, smoothing=0)
 
 # Training loop
 for steps in pbar:
@@ -118,6 +118,6 @@ torch.save({
 'actor_optimiser_state_dict': actor_optimiser.state_dict(),
 'critics_optimiser_state_dict': critics_optimiser.state_dict(),
 'alpha_optimizer_state_dict': alpha_optimizer.state_dict(),
-},"/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/agent2.pth")
+},"/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/agent_extension.pth")
 print("Saving replay buffer")
-pickle.dump( D, open("/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/deque2.p", "wb" ) )
+pickle.dump( D, open("/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/deque_extension.p", "wb" ) )

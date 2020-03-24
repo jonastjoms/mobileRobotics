@@ -346,14 +346,14 @@ def run(args):
     critic_1 = Critic(HIDDEN_SIZE, state_action=True).to(device)
     critic_2 = Critic(HIDDEN_SIZE, state_action=True).to(device)
     value_critic = Critic(HIDDEN_SIZE).to(device)
-    if resuming:
-        print("Loading models")
-        checkpoint = torch.load("/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/agent_extension.pth")
-        actor.load_state_dict(checkpoint['actor_state_dict'])
-        critic_1.load_state_dict(checkpoint['critic_1_state_dict'])
-        critic_2.load_state_dict(checkpoint['critic_2_state_dict'])
-        value_critic.load_state_dict(checkpoint['value_critic_state_dict'])
-        UPDATE_START = 0
+    # if resuming:
+    #     print("Loading models")
+    #     checkpoint = torch.load("/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/agent_extension.pth")
+    #     actor.load_state_dict(checkpoint['actor_state_dict'])
+    #     critic_1.load_state_dict(checkpoint['critic_1_state_dict'])
+    #     critic_2.load_state_dict(checkpoint['critic_2_state_dict'])
+    #     value_critic.load_state_dict(checkpoint['value_critic_state_dict'])
+    #     UPDATE_START = 0
 
     target_value_critic = create_target_network(value_critic).to(device)
     actor_optimiser = optim.Adam(actor.parameters(), lr=LEARNING_RATE)
@@ -366,17 +366,17 @@ def run(args):
     alpha_optimizer = optim.Adam([log_alpha], lr=LEARNING_RATE)
 
     # Load models
-    if resuming:
-        target_value_critic.load_state_dict(checkpoint['target_value_critic_state_dict'])
-        actor_optimiser.load_state_dict(checkpoint['actor_optimiser_state_dict'])
-        critics_optimiser.load_state_dict(checkpoint['critics_optimiser_state_dict'])
-        value_critic_optimiser.load_state_dict(checkpoint['value_critic_optimiser_state_dict'])
-        alpha_optimizer.load_state_dict(checkpoint['alpha_optimizer_state_dict'])
-        D = pickle.load( open("/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/deque_extension.p", "rb" ) )
-        rewards = pickle.load( open("/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/training_rewards_extension.p", "rb" ) )
-        errors = pickle.load( open("/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/errors_extension.p", "rb" ) )
-        p_values = pickle.load( open("/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/p_values.p", "rb" ) )
-        d_values = pickle.load( open("/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/d_values.p", "rb" ) )
+    # if resuming:
+    #     target_value_critic.load_state_dict(checkpoint['target_value_critic_state_dict'])
+    #     actor_optimiser.load_state_dict(checkpoint['actor_optimiser_state_dict'])
+    #     critics_optimiser.load_state_dict(checkpoint['critics_optimiser_state_dict'])
+    #     value_critic_optimiser.load_state_dict(checkpoint['value_critic_optimiser_state_dict'])
+    #     alpha_optimizer.load_state_dict(checkpoint['alpha_optimizer_state_dict'])
+    #     D = pickle.load( open("/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/deque_extension.p", "rb" ) )
+    #     rewards = pickle.load( open("/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/training_rewards_extension.p", "rb" ) )
+    #     errors = pickle.load( open("/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/errors_extension.p", "rb" ) )
+    #     p_values = pickle.load( open("/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/p_values.p", "rb" ) )
+    #     d_values = pickle.load( open("/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/d_values.p", "rb" ) )
 
     # Other variables
     reward_sparse = True
@@ -441,7 +441,6 @@ def run(args):
     subgoal.path_pointer = 4
     subgoal.set_position(np.array(current_path[subgoal.path_pointer]))
 
-
     # Training loop
     for step in pbar:
         slam.update()
@@ -466,12 +465,12 @@ def run(args):
                     action = torch.tensor([2 * random.random() - 1, 2 * random.random() - 1], device=device).unsqueeze(0)
                 else:
                     # Observe state s and select action a ~ mu(a|s)
-                    action = actor(state.unsqueeze(0)).mean
+                    action = actor(state.unsqueeze(0)).sample()
                 # Scale action so that we don't reach max = 0.5
                 action = action/4
                 # No make sure values for p_value, d_value and EPSILON are scaled correctly
-                p_value = 2 + 1.5*action.numpy()[0][0]
-                d_value = 2 + 1.5*action.numpy()[0][1]
+                p_value = 1+ action.numpy()[0][0]
+                d_value = 1+ action.numpy()[0][1]
                 #EPSILON = 0.1 + 0.3*action.numpy()[0][1]
                 # Get velocity:
                 v = get_velocity(error, old_error, p_value, d_value)
@@ -560,7 +559,7 @@ def run(args):
                     reward = -1
                 episode_reward += reward
                 if not testing:
-                    key = "Testing2" + str(episode)
+                    key = episode
                     rewards[key] = episode_reward/episode_step
                     errors[key] = episode_error/episode_step
                     p_values[key] = sum_p_value/episode_step
@@ -613,7 +612,8 @@ def run(args):
             sum_d_value += d_value
 
             # Store (s, a, r, s', d) in replay buffer D
-            #print("")
+            print("")
+            print("V", v)
             #print("state", state.numpy())
             #print("Pos", position)
             #print("SubGoal", subgoal.position)

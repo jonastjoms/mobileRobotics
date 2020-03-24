@@ -348,6 +348,7 @@ def run(args):
     reward_sum = 0
     episode_step = 1
     first_update = True
+    positions = []
 
     # SAC initialisations
     action_space = 2
@@ -358,7 +359,7 @@ def run(args):
     value_critic = Critic(HIDDEN_SIZE).to(device)
     if resuming:
         print("Loading models")
-        checkpoint = torch.load("/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/agent2.pth")
+        checkpoint = torch.load("/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/agent.pth")
         actor.load_state_dict(checkpoint['actor_state_dict'])
         critic_1.load_state_dict(checkpoint['critic_1_state_dict'])
         critic_2.load_state_dict(checkpoint['critic_2_state_dict'])
@@ -382,9 +383,9 @@ def run(args):
         critics_optimiser.load_state_dict(checkpoint['critics_optimiser_state_dict'])
         value_critic_optimiser.load_state_dict(checkpoint['value_critic_optimiser_state_dict'])
         alpha_optimizer.load_state_dict(checkpoint['alpha_optimizer_state_dict'])
-        D = pickle.load( open("/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/deque2.p", "rb" ) )
-        rewards = pickle.load( open("/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/training_rewards2.p", "rb" ) )
-        errors = pickle.load( open("/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/errors2.p", "rb" ) )
+        D = pickle.load( open("/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/deque.p", "rb" ) )
+        #rewards = pickle.load( open("/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/training_rewards.p", "rb" ) )
+        #errors = pickle.load( open("/home/jonas/catkin_ws/src/exercises/part2/ros/checkpoints/errors.p", "rb" ) )
 
     # Other variables
     reward_sparse = True
@@ -476,11 +477,11 @@ def run(args):
                     # Observe state s and select action a ~ mu(a|s)
                     action = actor(state.unsqueeze(0)).sample()
                 # Scale action so that we don't reach max = 0.5
-                action = action/2
+                action = action/4
                 # Get forward and rotational velocity:
-                #u, w = feedback_linearized(slam.pose, action.numpy()[0], epsilon=EPSILON)
-                u = action.numpy()[0][0]
-                w = action.numpy()[0][1]/2
+                u, w = feedback_linearized(slam.pose, action.numpy()[0], epsilon=EPSILON)
+                #u = action.numpy()[0][0]
+                #w = action.numpy()[0][1]/2
                 # Execute action:
                 vel_msg = Twist()
                 vel_msg.linear.x = u
@@ -568,6 +569,9 @@ def run(args):
                     episode_reward = 0
                     episode_error = 0
                     episode_step = 0
+                    print(positions)
+                    print(current_path)
+                    positions = []
                 episode += 1
                 # Make sure the robot is stopped.
                 i = 0
@@ -606,6 +610,8 @@ def run(args):
             episode_reward += reward
             episode_error += error
             episode_step += 1
+            p = (position[0], position[1])
+            positions.append(p)
 
             # Store (s, a, r, s', d) in replay buffer D
             #print("")
